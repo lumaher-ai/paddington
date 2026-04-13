@@ -1,5 +1,5 @@
 
-# Exercice 1: type hintsin using dict
+# Exercice 1: type hint using dict
 def parse_user(raw: dict) -> dict[str, str | int]:
     if not isinstance(raw, dict):
         raise TypeError(f"expected dict, got {type(raw).__name__}")
