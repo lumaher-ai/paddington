@@ -1,8 +1,11 @@
 from fastapi import FastAPI
 
+from paddington.config import get_settings
 from paddington.routes import echo, health
 
-app = FastAPI(title="paddington", version="0.1.0")
+settings = get_settings()
+
+app = FastAPI(title=settings.app_name, version=settings.app_version, debug=settings.debug)
 
 app.include_router(health.router)
 app.include_router(echo.router)
