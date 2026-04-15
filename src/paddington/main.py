@@ -1,36 +1,41 @@
-from datetime import datetime, timezone
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from pydantic import BaseModel
 
-app = FastAPI(title="paddington", version="0.1.0")
+from paddington.config import get_settings
+from paddington.logging_config import configure_logging, get_logger
+from paddington.routes import echo, health
 
+configure_logging()
 
-class HealthResponse(BaseModel):
-    status: str
-    version: str
+logger = get_logger(__name__)
 
-
-class EchoRequest(BaseModel):
-    message: str
-    repeat: int = 1
+settings = get_settings()
 
 
-class EchoResponse(BaseModel):
-    original: str
-    echoed: list[str]
-    received_at: datetime
-
-
-@app.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
-    return HealthResponse(status="ok", version="0.1.0")
-
-
-@app.post("/echo", response_model=EchoResponse)
-async def echo(request: EchoRequest) -> EchoResponse:
-    return EchoResponse(
-        original=request.message,
-        echoed=[request.message] * request.repeat,
-        received_at=datetime.now(timezone.utc),
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Startup logic
+    logger.info(
+        "application_starting",
+        app_name=settings.app_name,
+        version=settings.app_version,
+        environment=settings.environment,
     )
+
+    yield
+
+    # Shutdown logic
+    logger.info("application_shutting_down", app_name=settings.app_name)
+
+
+app = FastAPI(
+    title=settings.app_name,
+    version=settings.app_version,
+    debug=settings.debug,
+    lifespan=lifespan,
+)
+
+app.include_router(health.router)
+app.include_router(echo.router)

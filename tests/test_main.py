@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from src.paddington.main import app
+from paddington.main import app
 
 client = TestClient(app)
 
@@ -24,3 +24,13 @@ def test_echo_repeats_message():
 def test_echo_rejects_invalid_repeat():
     response = client.post("/echo", json={"message": "hi", "repeat": "not a number"})
     assert response.status_code == 422  # Pydantic validation error
+
+
+def test_echo_rejects_empty_message():
+    response = client.post("/echo", json={"message": "", "repeat": 1})
+    assert response.status_code == 422
+
+
+def test_echo_rejects_repeat_over_limit():
+    response = client.post("/echo", json={"message": "hi", "repeat": 100})
+    assert response.status_code == 422
