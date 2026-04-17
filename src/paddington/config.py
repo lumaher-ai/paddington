@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     app_name: str = "paddington"
     app_version: str = "0.1.0"
     environment: str = Field(default="development", description="development, staging, production")
-    debug: bool = False
+    debug: bool = True
 
     # Server
     host: str = "127.0.0.1"
@@ -24,6 +24,12 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = Field(default="INFO", description="DEBUG, INFO, WARNING, ERROR, CRITICAL")
+
+    # Database
+    database_url: str = Field(
+        default="postgresql+asyncpg://paddington:paddington_dev_password@localhost:5432/paddington",
+        description="Async PostgreSQL connection URL",
+    )
 
 
 @lru_cache
