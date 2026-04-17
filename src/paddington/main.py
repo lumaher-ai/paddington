@@ -4,8 +4,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from paddington.config import get_settings
+from paddington.database import close_db, init_db
 from paddington.logging_config import configure_logging, get_logger
-from paddington.routes import echo, health
+from paddington.routes import echo, health, users
 
 configure_logging()
 
@@ -16,18 +17,11 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # Startup logic
-    logger.info(
-        "application_starting",
-        app_name=settings.app_name,
-        version=settings.app_version,
-        environment=settings.environment,
-    )
-
+    await init_db()
+    logger.info("application_started")
     yield
-
-    # Shutdown logic
-    logger.info("application_shutting_down", app_name=settings.app_name)
+    await close_db()
+    logger.info("application_stopped")
 
 
 app = FastAPI(
@@ -39,3 +33,4 @@ app = FastAPI(
 
 app.include_router(health.router)
 app.include_router(echo.router)
+app.include_router(users.router)
