@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from paddington.config import get_settings
 from paddington.database import close_db, init_db
+from paddington.exception_handlers import register_exception_handlers
 from paddington.logging_config import configure_logging, get_logger
 from paddington.routes import echo, health, users
 
@@ -30,6 +31,8 @@ app = FastAPI(
     debug=settings.debug,
     lifespan=lifespan,
 )
+
+register_exception_handlers(app)
 
 app.include_router(health.router)
 app.include_router(echo.router)

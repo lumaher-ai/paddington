@@ -18,3 +18,11 @@ class User(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(
+            timezone.utc
+        ),  # Each time SQLAlchemy performs an UPDATE on this row, it automatically updates update_at with the current time.
+        nullable=False,
+    )

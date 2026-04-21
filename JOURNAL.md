@@ -47,3 +47,59 @@
 
 **Tomorrow:**
 - Day 4: preparation for week 2 — Postgres with Docker, SQLAlchemy 2.0 async, Alembic migrations
+
+## Day 4 — [04/15/2026]
+
+**Done:**
+- Postgres 16 running via Docker Compose with healthcheck and persistent volume
+- asyncpg connection tested with raw SQL
+- SQLAlchemy 2.0 async setup: engine, session factory, declarative Base
+- First model: User with UUID PK, unique email
+- Alembic initialized with async template; first migration generated and applied
+- Repository pattern with UserRepository encapsulating DB access
+- UserService wrapping the repository
+- POST /users endpoint with full DI chain: route → service → repository → session
+- Tests with SQLite in-memory and dependency_overrides
+- 8 tests total passing (5 from before + 3 new)
+
+**Learned:**
+- Docker Compose isolates Postgres from my system; tear-down is `docker compose down -v`
+- SQLAlchemy has 2 layers: Core (SQL builder) and ORM (class-to-table mapping); I'm using ORM
+- `Mapped[type]` + `mapped_column(...)` is the modern 2.0 syntax; replaces old `Column(...)` style
+- Alembic doesn't detect models unless you explicitly import them in env.py
+- `session.flush()` triggers INSERT to detect IntegrityError early; commit closes the transaction
+- Repository pattern keeps services agnostic of SQLAlchemy specifics
+- `dependency_overrides` in FastAPI tests is what makes DI worth the ceremony
+
+**Things I've seen but don't deeply understand yet (and that's OK):**
+- SQLAlchemy session lifecycle in detail (when exactly does flush vs commit happen)
+- Connection pool tuning (just using defaults)
+- Alembic migration conflict resolution (haven't hit it yet)
+
+**Tomorrow:**
+- Day 5: relationships between models, more endpoints (GET /users, GET /users/{id})
+
+## Day 5 — [04/16/2026]
+
+**Done:**
+- Added updated_at field with onupdate to User model + migration
+- Completed CRUD: GET list (paginated), GET by id, PATCH (partial), DELETE
+- Built centralized exception handling with PaddingtonError hierarchy
+- Single handler catches all domain exceptions automatically
+- 12+ tests covering all endpoints, happy and sad paths
+- Swagger UI verified end-to-end
+
+**Learned:**
+- model_dump(exclude_unset=True) distinguishes "field not sent" from "field sent as null" — critical for PATCH
+- Query(ge=1, le=100) validates query params declaratively, same pattern as Field for body
+- Centralized exception handlers eliminate try/except duplication in routes
+- Base exception with status_code attribute lets one handler manage all domain errors
+- onupdate in mapped_column auto-updates timestamps on every UPDATE
+
+**Things I've seen but don't deeply understand yet (and that's OK):**
+- SQLAlchemy session internals: flush vs commit timing in nested operations
+- How select().order_by().limit().offset() translates to actual SQL
+- Alembic migration conflict resolution (still haven't hit it)
+
+**Tomorrow:**
+- Day 6: Auth — hashing, JWT, Bearer tokens, login/signup, protected endpoints
