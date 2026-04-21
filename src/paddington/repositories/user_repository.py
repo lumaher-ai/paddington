@@ -5,14 +5,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from paddington.exceptions import AlreadyExistsError, NotFoundError
 from paddington.models import User
 
 
-class UserAlreadyExistsError(Exception):
+class UserAlreadyExistsError(AlreadyExistsError):
     pass
 
 
-class UserNotFoundError(Exception):
+class UserNotFoundError(NotFoundError):
     pass
 
 
