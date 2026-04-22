@@ -1,4 +1,3 @@
-from csv import unregister_dialect
 from uuid import UUID
 
 from sqlalchemy import select
@@ -21,8 +20,8 @@ class UserRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create(self, name: str, email: str) -> User:
-        user = User(name=name, email=email)
+    async def create(self, name: str, email: str, hashed_password: str) -> User:
+        user = User(name=name, email=email, hashed_password=hashed_password)
         self._session.add(user)
         try:
             await self._session.flush()
