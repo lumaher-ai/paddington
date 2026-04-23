@@ -103,3 +103,24 @@
 
 **Tomorrow:**
 - Day 6: Auth — hashing, JWT, Bearer tokens, login/signup, protected endpoints
+
+## Day 6 — [04/17/2026]
+
+**Done:**
+- Studied security theory: encoding, encryption, hashing (bcrypt, scrypt, argon2), and JWT principle of integrity, not confidentiality
+- Implemented argon2 password hashing with passlib
+- Built POST /auth/signup and POST /auth/login endpoints
+- Generated JWTs with python-jose including sub, email, exp, iat claims
+- Built get_current_user dependency using HTTPBearer
+- Protected GET /users/me with Bearer token
+- Moved shared test fixtures to conftest.py
+- 23 tests passing
+
+**Key security concepts I can now explain:**
+- Why bcrypt and not SHA-256 for passwords (intentionally slow prevents brute force)
+- Why JWT payload is readable but secure (signature prevents tampering)
+- Why login error messages should be identical for wrong email vs wrong password
+- What "Bearer" means in Authorization header (RFC 6750, "whoever bears this token")
+
+**Tomorrow:**
+- Day 7: RBAC (roles), refresh tokens, and OAuth conceptual overview
