@@ -2,7 +2,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 
-from paddington.dependencies import get_user_service
+from paddington.dependencies import get_current_user, get_user_service
+from paddington.models import User
 from paddington.schemas.user import (
     UserCreate,
     UserListResponse,
@@ -40,6 +41,13 @@ async def list_users(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/me", response_model=UserResponse)
+async def get_current_user_profile(
+    current_user: User = Depends(get_current_user),
+) -> UserResponse:
+    return UserResponse.model_validate(current_user)
 
 
 @router.get("/{user_id}", response_model=UserResponse)
