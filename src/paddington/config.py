@@ -31,6 +31,16 @@ class Settings(BaseSettings):
         description="Async PostgreSQL connection URL",
     )
 
+    # Dentro de la clase Settings, después de database_url
+
+    # Auth
+    jwt_secret_key: str = Field(
+        default="CHANGE-ME-IN-PRODUCTION-use-a-real-random-string",
+        description="Secret key for signing JWTs",
+    )
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 30
+
 
 @lru_cache
 def get_settings() -> Settings:

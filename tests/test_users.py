@@ -31,16 +31,6 @@ async def test_session() -> AsyncIterator[AsyncSession]:
     await engine.dispose()
 
 
-@pytest.fixture
-def client(test_session: AsyncSession) -> Generator[TestClient, None, None]:
-    async def override_get_db_session():
-        yield test_session
-
-    app.dependency_overrides[get_db_session] = override_get_db_session
-    yield TestClient(app)
-    app.dependency_overrides.clear()
-
-
 def test_create_user_returns_201(client: TestClient) -> None:
     response = client.post(
         "/users",

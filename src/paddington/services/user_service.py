@@ -7,6 +7,11 @@ from paddington.repositories.user_repository import (
     UserRepository,
 )
 from paddington.schemas.user import UserCreate, UserUpdate
+from paddington.services.auth_service import (
+    InvalidCredentialsError,
+    hash_password,
+    verify_password,
+)
 
 
 class UserService:
@@ -17,6 +22,7 @@ class UserService:
         return await self._repository.create(
             name=data.name,
             email=data.email,
+            hashed_password=hash_password("default_password"),
         )
 
     async def get_user(self, user_id: UUID) -> User:
@@ -35,6 +41,21 @@ class UserService:
 
     async def delete_user(self, user_id: UUID) -> None:
         await self._repository.delete(user_id)
+
+    async def create_user_with_password(self, name: str, email: str, password: str) -> User:
+        return await self._repository.create(
+            name=name,
+            email=email,
+            hashed_password=hash_password(password),
+        )
+
+    async def authenticate(self, email: str, password: str) -> User:
+        user = await self._repository.get_by_email(email)
+        if user is None:
+            raise InvalidCredentialsError("Invalid email or password")
+        if not verify_password(password, user.hashed_password):
+            raise InvalidCredentialsError("Invalid email or password")
+        return user
 
 
 __all__ = ["UserService", "UserAlreadyExistsError", "UserNotFoundError"]

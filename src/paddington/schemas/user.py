@@ -20,7 +20,7 @@ class UserResponse(BaseModel):
     email: EmailStr
     created_at: datetime
     updated_at: datetime
-
+    # hashed_password is NOT here because shoud be never exposed
     model_config = {"from_attributes": True}
 
 
