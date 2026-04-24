@@ -9,6 +9,7 @@ from paddington.database import get_session
 from paddington.exceptions import ForbiddenError
 from paddington.models import User
 from paddington.models.enums import UserRole
+from paddington.repositories.refresh_token_repository import RefreshTokenRepository
 from paddington.repositories.user_repository import UserRepository
 from paddington.services.auth_service import InvalidTokenError, decode_access_token
 from paddington.services.user_service import UserService
@@ -63,3 +64,9 @@ def require_role(*allowed_roles: UserRole) -> Callable:
         return current_user
 
     return role_checker
+
+
+def get_refresh_token_repository(
+    session: AsyncSession = Depends(get_db_session),
+) -> RefreshTokenRepository:
+    return RefreshTokenRepository(session)

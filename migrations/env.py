@@ -10,7 +10,10 @@ from paddington.config import get_settings
 from paddington.database import Base
 
 # Import all models so Alembic detects them
-from paddington.models import user  # noqa: F401
+from paddington.models import (
+    refresh_token,  # noqa: F401
+    user,  # noqa: F401  # noqa: F401
+)
 
 config = context.config
 
