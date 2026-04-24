@@ -33,5 +33,5 @@ async def login(
         email=data.email,
         password=data.password,
     )
-    token = create_access_token(user_id=user.id, email=user.email)
+    token = create_access_token(user_id=user.id, email=user.email, role=user.role)
     return TokenResponse(access_token=token)
