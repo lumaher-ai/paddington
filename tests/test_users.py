@@ -81,21 +81,27 @@ def test_get_user_not_found_returns_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_list_users_returns_paginated_response(client: TestClient) -> None:
+def test_list_users_returns_paginated_response(client: TestClient, admin_token: str) -> None:
     for i in range(3):
         client.post("/users", json={"name": f"User {i}", "email": f"user{i}@example.com"})
 
-    response = client.get("/users?limit=2&offset=0")
+    response = client.get(
+        "/users?limit=2&offset=0",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
     assert response.status_code == 200
     data = response.json()
     assert len(data["users"]) == 2
-    assert data["total"] == 3
+    assert data["total"] == 4  # 3 created here + 1 admin from fixture
     assert data["limit"] == 2
     assert data["offset"] == 0
 
 
-def test_list_users_rejects_invalid_limit(client: TestClient) -> None:
-    response = client.get("/users?limit=500")
+def test_list_users_rejects_invalid_limit(client: TestClient, admin_token: str) -> None:
+    response = client.get(
+        "/users?limit=500",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
     assert response.status_code == 422
 
 
@@ -121,21 +127,27 @@ def test_update_user_not_found_returns_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_delete_user_returns_204(client: TestClient) -> None:
+def test_delete_user_returns_204(client: TestClient, admin_token: str) -> None:
     create_response = client.post(
         "/users",
         json={"name": "To Delete", "email": "delete@example.com"},
     )
     user_id = create_response.json()["id"]
 
-    response = client.delete(f"/users/{user_id}")
+    response = client.delete(
+        f"/users/{user_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
     assert response.status_code == 204
 
     get_response = client.get(f"/users/{user_id}")
     assert get_response.status_code == 404
 
 
-def test_delete_user_not_found_returns_404(client: TestClient) -> None:
+def test_delete_user_not_found_returns_404(client: TestClient, admin_token: str) -> None:
     fake_id = "00000000-0000-0000-0000-000000000000"
-    response = client.delete(f"/users/{fake_id}")
+    response = client.delete(
+        f"/users/{fake_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
     assert response.status_code == 404
