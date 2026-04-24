@@ -5,6 +5,7 @@ from sqlalchemy import DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from paddington.database import Base
+from paddington.models.enums import UserRole
 
 
 class User(Base):
@@ -14,6 +15,7 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), default=UserRole.USER, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -22,8 +24,6 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(
-            timezone.utc
-        ),  # Each time SQLAlchemy performs an UPDATE on this row, it automatically updates update_at with the current time.
+        onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
