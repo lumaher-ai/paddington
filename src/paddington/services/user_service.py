@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from paddington.models import User
+from paddington.models.enums import UserRole
 from paddington.repositories.user_repository import (
     UserAlreadyExistsError,
     UserNotFoundError,
@@ -56,6 +57,9 @@ class UserService:
         if not verify_password(password, user.hashed_password):
             raise InvalidCredentialsError("Invalid email or password")
         return user
+
+    async def update_role(self, user_id: UUID, role: UserRole) -> User:
+        return await self._repository.update_role(user_id, role.value)
 
 
 __all__ = ["UserService", "UserAlreadyExistsError", "UserNotFoundError"]

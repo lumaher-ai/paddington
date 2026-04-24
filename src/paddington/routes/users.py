@@ -2,12 +2,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 
-from paddington.dependencies import get_current_user, get_user_service
+from paddington.dependencies import get_current_user, get_user_service, require_role
 from paddington.models import User
+from paddington.models.enums import UserRole
 from paddington.schemas.user import (
     UserCreate,
     UserListResponse,
     UserResponse,
+    UserRoleUpdate,
     UserUpdate,
 )
 from paddington.services.user_service import UserService
@@ -28,7 +30,11 @@ async def create_user(
     return UserResponse.model_validate(user)
 
 
-@router.get("", response_model=UserListResponse)
+@router.get(
+    "",
+    response_model=UserListResponse,
+    dependencies=[Depends(require_role(UserRole.ADMIN))],
+)
 async def list_users(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -69,7 +75,25 @@ async def update_user(
     return UserResponse.model_validate(user)
 
 
-@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.patch(
+    "/{user_id}/role",
+    response_model=UserResponse,
+    dependencies=[Depends(require_role(UserRole.ADMIN))],
+)
+async def update_user_role(
+    user_id: UUID,
+    data: UserRoleUpdate,
+    service: UserService = Depends(get_user_service),
+) -> UserResponse:
+    user = await service.update_role(user_id, data.role)
+    return UserResponse.model_validate(user)
+
+
+@router.delete(
+    "/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_role(UserRole.ADMIN))],
+)
 async def delete_user(
     user_id: UUID,
     service: UserService = Depends(get_user_service),

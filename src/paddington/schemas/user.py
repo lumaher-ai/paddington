@@ -32,3 +32,7 @@ class UserListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class UserRoleUpdate(BaseModel):
+    role: UserRole

@@ -74,3 +74,9 @@ class UserRepository:
         user = await self.get_by_id(user_id)
         await self._session.delete(user)
         await self._session.flush()
+
+    async def update_role(self, user_id: UUID, role: str) -> User:
+        user = await self.get_by_id(user_id)
+        user.role = role
+        await self._session.flush()
+        return user
