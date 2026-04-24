@@ -1,5 +1,4 @@
+from paddington.models.refresh_token import RefreshToken
 from paddington.models.user import User
 
-__all__ = ["User"]
-
-# This allows writing `from paddington.models import User` to other files.
+__all__ = ["User", "RefreshToken"]

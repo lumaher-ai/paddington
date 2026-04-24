@@ -124,3 +124,26 @@
 
 **Tomorrow:**
 - Day 7: RBAC (roles), refresh tokens, and OAuth conceptual overview
+
+## Day 7 — [04/20/2026]
+
+**Done:**
+- Added UserRole enum (user, admin) and role field to User model
+- Built require_role dependency factory using closures
+- Protected DELETE and list endpoints with admin-only access
+- Built PATCH /users/{id}/role for admin promotion
+- Created CLI tool for seeding first admin
+- Implemented refresh tokens with DB-backed rotation
+- POST /auth/refresh revokes old token and issues new pair
+- Studied OAuth 2.0 Authorization Code flow conceptually
+- Updated all tests for new auth requirements
+
+**Key concepts I can now explain:**
+- RBAC: assign permissions to roles, assign roles to users, check roles not individual permissions
+- Why require_role returns a function (closure pattern for parameterized dependencies)
+- Why refresh tokens exist (short-lived access for security + long-lived refresh for UX)
+- Token rotation: revoke on use, detect stolen tokens when legitimate user gets 401
+- OAuth 2.0 Authorization Code flow: why the code intermediate step exists (separates browser-visible redirect from server-to-server token exchange)
+
+**Tomorrow:**
+- Day 8: week 2 wrap-up, code cleanup, full test suite verification, plan week 3 (LLM APIs + RAG)

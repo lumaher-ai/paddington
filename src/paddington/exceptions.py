@@ -20,4 +20,8 @@ class AlreadyExistsError(PaddingtonError):
 
 
 class ValidationError(PaddingtonError):
-    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+
+
+class ForbiddenError(PaddingtonError):
+    status_code = status.HTTP_403_FORBIDDEN

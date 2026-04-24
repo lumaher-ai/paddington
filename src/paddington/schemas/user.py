@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
 
+from paddington.models.enums import UserRole
+
 
 class UserCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -18,6 +20,7 @@ class UserResponse(BaseModel):
     id: UUID
     name: str
     email: EmailStr
+    role: UserRole
     created_at: datetime
     updated_at: datetime
     # hashed_password is NOT here because shoud be never exposed
@@ -29,3 +32,7 @@ class UserListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class UserRoleUpdate(BaseModel):
+    role: UserRole
