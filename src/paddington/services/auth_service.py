@@ -1,11 +1,15 @@
 from datetime import datetime, timedelta, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 from paddington.config import get_settings
 from paddington.exceptions import PaddingtonError
+from paddington.models import refresh_token
+from paddington.repositories.refresh_token_repository import RefreshTokenRepository
+from paddington.repositories.user_repository import UserRepository
+from paddington.schemas.auth import TokenResponse
 
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
@@ -36,6 +40,7 @@ def create_access_token(user_id: UUID, email: str, role: str) -> str:
         "role": role,
         "exp": expire,
         "iat": datetime.now(timezone.utc),
+        "jti": str(uuid4()),
     }
 
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
@@ -48,3 +53,56 @@ def decode_access_token(token: str) -> dict:
         return payload
     except JWTError as e:
         raise InvalidTokenError("Invalid or expired token") from e
+
+
+class AuthService:
+    def __init__(
+        self,
+        user_repository: UserRepository,
+        refresh_token_repository: RefreshTokenRepository,
+    ) -> None:
+        self._user_repo = user_repository
+        self._refresh_repo = refresh_token_repository
+
+    async def signup(self, name: str, email: str, password: str):
+        return await self._user_repo.create(
+            name=name,
+            email=email,
+            hashed_password=hash_password(password),
+        )
+
+    async def login(self, email: str, password: str) -> TokenResponse:
+        user = await self._user_repo.get_by_email(email)
+        if user is None:
+            raise InvalidCredentialsError("Invalid email or password")
+        if not verify_password(password, user.hashed_password):
+            raise InvalidCredentialsError("Invalid email or password")
+
+        access_token = create_access_token(
+            user_id=user.id,
+            email=user.email,
+            role=user.role,
+        )
+        new_refresh_token = await self._refresh_repo.create(user_id=user.id)
+
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=new_refresh_token.token,
+        )
+
+    async def refresh(self, refresh_token_str: str) -> TokenResponse:
+        old_token = await self._refresh_repo.get_valid_token(refresh_token_str)
+        await self._refresh_repo.revoke(old_token)
+
+        user = await self._user_repo.get_by_id(old_token.user_id)
+        new_access_token = create_access_token(
+            user_id=user.id,
+            email=user.email,
+            role=user.role,
+        )
+        new_refresh_token = await self._refresh_repo.create(user_id=user.id)
+
+        return TokenResponse(
+            access_token=new_access_token,
+            refresh_token=new_refresh_token.token,
+        )

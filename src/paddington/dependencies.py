@@ -11,7 +11,7 @@ from paddington.models import User
 from paddington.models.enums import UserRole
 from paddington.repositories.refresh_token_repository import RefreshTokenRepository
 from paddington.repositories.user_repository import UserRepository
-from paddington.services.auth_service import InvalidTokenError, decode_access_token
+from paddington.services.auth_service import AuthService, InvalidTokenError, decode_access_token
 from paddington.services.user_service import UserService
 
 security_scheme = HTTPBearer()
@@ -70,3 +70,14 @@ def get_refresh_token_repository(
     session: AsyncSession = Depends(get_db_session),
 ) -> RefreshTokenRepository:
     return RefreshTokenRepository(session)
+
+
+def get_auth_service(
+    session: AsyncSession = Depends(get_db_session),
+) -> AuthService:
+    from paddington.services.auth_service import AuthService
+
+    return AuthService(
+        user_repository=UserRepository(session),
+        refresh_token_repository=RefreshTokenRepository(session),
+    )
