@@ -16,7 +16,7 @@ class ProductInfo(BaseModel):
 
 
 async def structured_with_openai() -> None:
-    """OpenAI has native structured output support with response_format."""
+    "OpenAI has native structured output support with response_format."
     settings = get_settings()
     client = AsyncOpenAI(api_key=settings.openai_api_key)
 
@@ -48,7 +48,7 @@ async def structured_with_openai() -> None:
 
 
 async def structured_with_anthropic() -> None:
-    """Anthropic uses tool_use to achieve structured output."""
+    "Anthropic uses tool_use to achieve structured output."
     from anthropic import AsyncAnthropic
 
     settings = get_settings()
@@ -58,7 +58,7 @@ async def structured_with_anthropic() -> None:
     tool_schema = ProductInfo.model_json_schema()
 
     response = await client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-haiku-4-5-20251001",
         max_tokens=1024,
         messages=[
             {
