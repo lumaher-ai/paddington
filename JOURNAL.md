@@ -147,3 +147,30 @@
 
 **Tomorrow:**
 - Day 8: week 2 wrap-up, code cleanup, full test suite verification, plan week 3 (LLM APIs + RAG)
+
+## Day 8 — [04/22/2026]
+
+**Done:**
+- Applied messages array structure (system, user, assistant, tool roles)
+- Called OpenAI and Anthropic using directly its SDK to compare differences
+- Implemented streaming for both providers
+- Built structured output with Pydantic (OpenAI response_format vs Anthropic tool_use trick)
+- Sent images to both LLMs (URL for OpenAI, base64 for Anthropic)
+- Built LLMClient wrapper with unified response, retries, cost tracking, structured logging
+- Created POST /chat authenticated endpoint
+- Wrote tests with AsyncMock (no real API calls)
+
+**Key differences between OpenAI and Anthropic I can now explain:**
+- System prompt: in messages array (OpenAI) vs separate parameter (Anthropic)
+- Response: string (OpenAI) vs array of content blocks (Anthropic)
+- Structured output: native response_format (OpenAI) vs tool_use workaround (Anthropic)
+- Image input: URL accepted (OpenAI) vs base64 required (Anthropic)
+- max_tokens: optional (OpenAI) vs mandatory (Anthropic)
+
+**Why I'm NOT using LiteLLM:**
+- Currently I am using only 2 providers; wrapper is less than 100 lines, not worth a dependency
+- Want to demonstrate I understand both APIs directly
+- Would use LiteLLM if team had 3+ providers or needed A/B testing
+
+**Tomorrow:**
+- Day 9: Embeddings, pgvector setup, chunking, RAG pipeline without frameworks
