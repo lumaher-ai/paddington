@@ -24,7 +24,7 @@ async def image_input_openai() -> None:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png",
+                            "url": "https://images.panda.org/assets/images/pages/welcome/orangutan_1600x1000_279157.jpg",
                         },
                     },
                 ],
@@ -47,7 +47,7 @@ async def image_input_anthropic() -> None:
     # Download image and convert to base64 (Anthropic requires base64, not URLs)
     async with httpx.AsyncClient() as http_client:
         img_response = await http_client.get(
-            "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"
+            "https://images.panda.org/assets/images/pages/welcome/orangutan_1600x1000_279157.jpg"
         )
         image_data = base64.b64encode(img_response.content).decode("utf-8")
 
@@ -62,7 +62,7 @@ async def image_input_anthropic() -> None:
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": "image/png",
+                            "media_type": "image/jpeg",
                             "data": image_data,
                         },
                     },
@@ -76,6 +76,7 @@ async def image_input_anthropic() -> None:
     if isinstance(block, TextBlock):
         print(block.text)
     print(f"Input tokens: {response.usage.input_tokens}")
+    print(f"Output tokens: {response.usage.output_tokens}")
 
 
 async def main() -> None:
