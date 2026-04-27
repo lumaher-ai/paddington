@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
 
+    openai_api_key: str = Field(default="", description="OpenAI API key")
+    anthropic_api_key: str = Field(default="", description="Anthropic API key")
+
 
 @lru_cache
 def get_settings() -> Settings:

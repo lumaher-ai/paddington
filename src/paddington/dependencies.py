@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from paddington.database import get_session
 from paddington.exceptions import ForbiddenError
+from paddington.llm.client import LLMClient
 from paddington.models import User
 from paddington.models.enums import UserRole
 from paddington.repositories.refresh_token_repository import RefreshTokenRepository
@@ -81,3 +82,16 @@ def get_auth_service(
         user_repository=UserRepository(session),
         refresh_token_repository=RefreshTokenRepository(session),
     )
+
+
+# It's a lazy singleton because creating the client involves reading the API keys
+# and creating the OpenAI/Anthropic HTTP clients. We only want to do that once.
+
+_llm_client: LLMClient | None = None
+
+
+def get_llm_client() -> LLMClient:
+    global _llm_client
+    if _llm_client is None:
+        _llm_client = LLMClient()
+    return _llm_client
