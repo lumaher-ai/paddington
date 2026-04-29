@@ -8,11 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from paddington.database import get_session
 from paddington.exceptions import ForbiddenError
 from paddington.llm.client import LLMClient
+from paddington.llm.embedding_service import EmbeddingService
 from paddington.models import User
 from paddington.models.enums import UserRole
+from paddington.repositories.document_repository import DocumentRepository
 from paddington.repositories.refresh_token_repository import RefreshTokenRepository
 from paddington.repositories.user_repository import UserRepository
 from paddington.services.auth_service import AuthService, InvalidTokenError, decode_access_token
+from paddington.services.document_service import DocumentService
 from paddington.services.user_service import UserService
 
 security_scheme = HTTPBearer()
@@ -95,3 +98,29 @@ def get_llm_client() -> LLMClient:
     if _llm_client is None:
         _llm_client = LLMClient()
     return _llm_client
+
+
+_embedding_service: EmbeddingService | None = None
+
+
+def get_embedding_service() -> EmbeddingService:
+    global _embedding_service
+    if _embedding_service is None:
+        _embedding_service = EmbeddingService()
+    return _embedding_service
+
+
+def get_document_repository(
+    session: AsyncSession = Depends(get_db_session),
+) -> DocumentRepository:
+    return DocumentRepository(session)
+
+
+def get_document_service(
+    repository: DocumentRepository = Depends(get_document_repository),
+    embedding_service: EmbeddingService = Depends(get_embedding_service),
+) -> DocumentService:
+    return DocumentService(
+        repository=repository,
+        embedding_service=embedding_service,
+    )
