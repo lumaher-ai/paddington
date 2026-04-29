@@ -1,6 +1,7 @@
 import asyncio
 from logging.config import fileConfig
 
+import pgvector.sqlalchemy  # noqa: F401 — ensures pgvector types are available in migrations
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
@@ -11,6 +12,7 @@ from paddington.database import Base
 
 # Import all models so Alembic detects them
 from paddington.models import (
+    document,  # noqa: F401
     refresh_token,  # noqa: F401
     user,  # noqa: F401  # noqa: F401
 )

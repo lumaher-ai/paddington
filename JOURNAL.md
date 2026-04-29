@@ -174,3 +174,34 @@
 
 **Tomorrow:**
 - Day 9: Embeddings, pgvector setup, chunking, RAG pipeline without frameworks
+
+## Day 9 — [04/23/2026]
+
+**Done:**
+- Reflect on RAG theory: what problem it solves, limitations, alternatives (stuffing, GraphRAG, agentic RAG, hybrid search)
+- Set up pgvector in Docker Compose with Alembic migration
+- Created Document and DocumentChunk models with vector(1536) column
+- Built EmbeddingService with batch support (text-embedding-3-small)
+- Implemented chunking with RecursiveCharacterTextSplitter (1000 chars, 200 overlap)
+- Built full RAG pipeline: upload → chunk → embed → store → query → search → LLM → answer
+- POST /documents and POST /documents/query endpoints with auth
+- Tests with mocked embedding and LLM services
+- Verified end-to-end with real Wikipedia article
+
+**Key concepts I can now explain:**
+- RAG solves "LLMs don't know your private data" without fine-tuning
+- Chunking quality is the #1 factor in RAG quality (more than model choice)
+- Embeddings capture semantic similarity, not logical operations (can't search for negations)
+- Cosine distance in pgvector is O(n) without index, HNSW index needed for >10k vectors
+- Long context windows (200k tokens) are an alternative to RAG for small document sets
+- GraphRAG captures entity relationships that vector search misses
+- Batch embedding is 100x faster than sequential for multiple texts
+
+**Limitations I'm aware of:**
+- No reranking yet (chunks are ranked purely by cosine distance)
+- No hybrid search (keyword + semantic)
+- Chunking params are not optimized for my specific use case
+- No hallucination detection (LLM might still ignore the context)
+
+**Tomorrow:**
+- Day 10: More RAG refinements, or begin tool calling if RAG is solid

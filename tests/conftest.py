@@ -13,12 +13,14 @@ from paddington.database import Base
 from paddington.dependencies import get_db_session
 from paddington.main import app
 
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+# ─── SQLite fixture (default, fast, no Docker needed) ───
+
+SQLITE_URL = "sqlite+aiosqlite:///:memory:"
 
 
 @pytest_asyncio.fixture
 async def test_session() -> AsyncIterator[AsyncSession]:
-    engine = create_async_engine(TEST_DATABASE_URL)
+    engine = create_async_engine(SQLITE_URL)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -33,28 +35,60 @@ async def test_session() -> AsyncIterator[AsyncSession]:
 
 @pytest.fixture
 def client(test_session: AsyncSession) -> Generator[TestClient, None, None]:
-    async def override_get_db_session():
+    async def override():
         yield test_session
 
-    app.dependency_overrides[get_db_session] = override_get_db_session
+    app.dependency_overrides[get_db_session] = override
     yield TestClient(app)
     app.dependency_overrides.clear()
 
 
+# ─── Postgres + pgvector fixture (opt-in, needs Docker) ───
+
+
+@pytest_asyncio.fixture(scope="module")
+async def pg_engine():
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer(
+        image="pgvector/pgvector:pg16",
+        username="test",
+        password="test",
+        dbname="test_paddington",
+    ) as postgres:
+        url = postgres.get_connection_url()
+        # Convert psycopg2 URL to asyncpg URL
+        async_url = url.replace("psycopg2", "asyncpg")
+
+        engine = create_async_engine(async_url)
+
+        # Enable pgvector extension and create tables
+        async with engine.begin() as conn:
+            await conn.execute(
+                __import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector;")
+            )
+            await conn.run_sync(Base.metadata.create_all)
+
+        yield engine
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+        await engine.dispose()
+
+
 @pytest_asyncio.fixture
-async def admin_token(test_session: AsyncSession) -> str:
-    from paddington.models import User
-    from paddington.models.enums import UserRole
-    from paddington.services.auth_service import create_access_token, hash_password
+async def pg_session(pg_engine) -> AsyncIterator[AsyncSession]:
+    session_factory = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with session_factory() as session:
+        yield session
+        await session.rollback()  # Clean up after each test
 
-    admin = User(
-        name="Admin",
-        email="admin@test.local",
-        hashed_password=hash_password("adminpass123"),
-        role=UserRole.ADMIN.value,
-    )
-    test_session.add(admin)
-    await test_session.commit()
-    await test_session.refresh(admin)
 
-    return create_access_token(user_id=admin.id, email=admin.email, role=admin.role)
+@pytest.fixture
+def pg_client(pg_session: AsyncSession) -> Generator[TestClient, None, None]:
+    async def override():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = override
+    yield TestClient(app)
+    app.dependency_overrides.clear()
