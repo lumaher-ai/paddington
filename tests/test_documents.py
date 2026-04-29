@@ -10,9 +10,8 @@ from paddington.main import app
 
 def _mock_embedding_service() -> EmbeddingService:
     mock = AsyncMock(spec=EmbeddingService)
-    # Return a deterministic fake embedding (1536 dimensions)
-    mock.embed_text.return_value = [0.1] * 1536
-    mock.embed_batch.return_value = [[0.1] * 1536, [0.1] * 1536, [0.1] * 1536]
+    mock.embed_text.side_effect = lambda text: [0.1] * 1536
+    mock.embed_batch.side_effect = lambda texts: [[0.1] * 1536 for _ in texts]
     return mock
 
 
@@ -31,23 +30,22 @@ def _mock_llm_client() -> LLMClient:
     return mock
 
 
-def test_upload_document_returns_201(client: TestClient) -> None:
+def test_upload_document_returns_201(pg_client: TestClient) -> None:
     mock_emb = _mock_embedding_service()
     app.dependency_overrides[get_embedding_service] = lambda: mock_emb
 
     # Signup + login
-    client.post(
+    pg_client.post(
         "/auth/signup",
         json={"name": "Doc User", "email": "doc@example.com", "password": "securepass123"},
     )
-    login = client.post(
+    login = pg_client.post(
         "/auth/login",
         json={"email": "doc@example.com", "password": "securepass123"},
     )
     token = login.json()["access_token"]
 
-    # Upload document
-    response = client.post(
+    response = pg_client.post(
         "/documents",
         json={
             "title": "Test Document",
@@ -64,25 +62,25 @@ def test_upload_document_returns_201(client: TestClient) -> None:
     app.dependency_overrides.pop(get_embedding_service, None)
 
 
-def test_query_returns_answer_with_sources(client: TestClient) -> None:
+def test_query_returns_answer_with_sources(pg_client: TestClient) -> None:
     mock_emb = _mock_embedding_service()
     mock_llm = _mock_llm_client()
     app.dependency_overrides[get_embedding_service] = lambda: mock_emb
     app.dependency_overrides[get_llm_client] = lambda: mock_llm
 
     # Signup + login
-    client.post(
+    pg_client.post(
         "/auth/signup",
         json={"name": "Query User", "email": "query@example.com", "password": "securepass123"},
     )
-    login = client.post(
+    login = pg_client.post(
         "/auth/login",
         json={"email": "query@example.com", "password": "securepass123"},
     )
     token = login.json()["access_token"]
 
     # Upload document first
-    client.post(
+    pg_client.post(
         "/documents",
         json={
             "title": "Knowledge Base",
@@ -92,7 +90,7 @@ def test_query_returns_answer_with_sources(client: TestClient) -> None:
     )
 
     # Query
-    response = client.post(
+    response = pg_client.post(
         "/documents/query",
         json={"question": "What is Python?", "top_k": 3},
         headers={"Authorization": f"Bearer {token}"},
@@ -102,23 +100,24 @@ def test_query_returns_answer_with_sources(client: TestClient) -> None:
     data = response.json()
     assert "answer" in data
     assert len(data["sources"]) > 0
+    assert data["sources"][0]["document_title"] == "Knowledge Base"
     assert data["model"] == "gpt-4o-mini"
 
     app.dependency_overrides.pop(get_embedding_service, None)
     app.dependency_overrides.pop(get_llm_client, None)
 
 
-def test_query_requires_auth(client: TestClient) -> None:
-    response = client.post(
+def test_query_requires_auth(pg_client: TestClient) -> None:
+    response = pg_client.post(
         "/documents/query",
         json={"question": "test"},
     )
     assert response.status_code == 401
 
 
-def test_upload_requires_auth(client: TestClient) -> None:
-    response = client.post(
+def test_upload_requires_auth(pg_client: TestClient) -> None:
+    response = pg_client.post(
         "/documents",
-        json={"title": "Test", "content": "test content here with enough length"},
+        json={"title": "Test", "content": "test content here with enough length for validation"},
     )
     assert response.status_code == 401
