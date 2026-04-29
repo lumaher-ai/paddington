@@ -1,11 +1,14 @@
 from unittest.mock import AsyncMock
 
-from fastapi.testclient import TestClient
+import pytest
+from httpx import AsyncClient
 
 from paddington.dependencies import get_embedding_service, get_llm_client
 from paddington.llm.client import LLMClient, LLMResponse
 from paddington.llm.embedding_service import EmbeddingService
 from paddington.main import app
+
+pytestmark = pytest.mark.asyncio(loop_scope="module")
 
 
 def _mock_embedding_service() -> EmbeddingService:
@@ -30,22 +33,22 @@ def _mock_llm_client() -> LLMClient:
     return mock
 
 
-def test_upload_document_returns_201(pg_client: TestClient) -> None:
+async def test_upload_document_returns_201(pg_async_client: AsyncClient) -> None:
     mock_emb = _mock_embedding_service()
     app.dependency_overrides[get_embedding_service] = lambda: mock_emb
 
     # Signup + login
-    pg_client.post(
+    await pg_async_client.post(
         "/auth/signup",
         json={"name": "Doc User", "email": "doc@example.com", "password": "securepass123"},
     )
-    login = pg_client.post(
+    login = await pg_async_client.post(
         "/auth/login",
         json={"email": "doc@example.com", "password": "securepass123"},
     )
     token = login.json()["access_token"]
 
-    response = pg_client.post(
+    response = await pg_async_client.post(
         "/documents",
         json={
             "title": "Test Document",
@@ -62,25 +65,25 @@ def test_upload_document_returns_201(pg_client: TestClient) -> None:
     app.dependency_overrides.pop(get_embedding_service, None)
 
 
-def test_query_returns_answer_with_sources(pg_client: TestClient) -> None:
+async def test_query_returns_answer_with_sources(pg_async_client: AsyncClient) -> None:
     mock_emb = _mock_embedding_service()
     mock_llm = _mock_llm_client()
     app.dependency_overrides[get_embedding_service] = lambda: mock_emb
     app.dependency_overrides[get_llm_client] = lambda: mock_llm
 
     # Signup + login
-    pg_client.post(
+    await pg_async_client.post(
         "/auth/signup",
         json={"name": "Query User", "email": "query@example.com", "password": "securepass123"},
     )
-    login = pg_client.post(
+    login = await pg_async_client.post(
         "/auth/login",
         json={"email": "query@example.com", "password": "securepass123"},
     )
     token = login.json()["access_token"]
 
     # Upload document first
-    pg_client.post(
+    await pg_async_client.post(
         "/documents",
         json={
             "title": "Knowledge Base",
@@ -90,7 +93,7 @@ def test_query_returns_answer_with_sources(pg_client: TestClient) -> None:
     )
 
     # Query
-    response = pg_client.post(
+    response = await pg_async_client.post(
         "/documents/query",
         json={"question": "What is Python?", "top_k": 3},
         headers={"Authorization": f"Bearer {token}"},
@@ -107,16 +110,16 @@ def test_query_returns_answer_with_sources(pg_client: TestClient) -> None:
     app.dependency_overrides.pop(get_llm_client, None)
 
 
-def test_query_requires_auth(pg_client: TestClient) -> None:
-    response = pg_client.post(
+async def test_query_requires_auth(pg_async_client: AsyncClient) -> None:
+    response = await pg_async_client.post(
         "/documents/query",
         json={"question": "test"},
     )
     assert response.status_code == 401
 
 
-def test_upload_requires_auth(pg_client: TestClient) -> None:
-    response = pg_client.post(
+async def test_upload_requires_auth(pg_async_client: AsyncClient) -> None:
+    response = await pg_async_client.post(
         "/documents",
         json={"title": "Test", "content": "test content here with enough length for validation"},
     )

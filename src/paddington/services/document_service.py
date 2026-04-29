@@ -44,7 +44,7 @@ class DocumentService:
         self._splitter = RecursiveCharacterTextSplitter(
             chunk_size=CHUNK_SIZE,
             chunk_overlap=CHUNK_OVERLAP,
-            separators=["\n\n", "\n", ". ", " ", ""],
+            separators=["\n\n", "\n", ". ", " ", ""],  # Recursive character splitting strategy
         )
 
     async def query(
@@ -52,13 +52,13 @@ class DocumentService:
         question: str,
         user_id: UUID,
         top_k: int = 5,
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-4.1-nano",
     ) -> QueryResponse:
         """Full RAG pipeline: embed query → search → build prompt → generate answer."""
-        # Step 1: Embed the question
+        # Step 1: Embed the question (Retrieval)
         query_embedding = await self._embedding_service.embed_text(question)
 
-        # Step 2: Find similar chunks
+        # Step 2: Find similar chunks (Retrieval)
         chunks = await self._repository.search_similar_chunks(
             query_embedding=query_embedding,
             user_id=user_id,
@@ -75,14 +75,14 @@ class DocumentService:
                 cost_usd=0.0,
             )
 
-        # Step 3: Build context from chunks
+        # Step 3: Build context from chunks (Augmented)
         context_parts = []
         for i, chunk in enumerate(chunks):
             document = await self._repository.get_document_by_id(chunk.document_id)
             context_parts.append(f"[Source {i + 1}: {document.title}]\n{chunk.content}")
         context = "\n\n---\n\n".join(context_parts)
 
-        # Step 4: Call LLM with context
+        # Step 4: Call LLM with context (Generation)
         system_prompt = RAG_SYSTEM_PROMPT.format(context=context)
         llm_response = await self._llm.chat(
             messages=[{"role": "user", "content": question}],
@@ -90,7 +90,7 @@ class DocumentService:
             model=model,
         )
 
-        # Step 5: Build response with sources
+        # Step 5: Build response with sources (Generation)
         sources = []
         for i, chunk in enumerate(chunks):
             document = await self._repository.get_document_by_id(chunk.document_id)
@@ -109,6 +109,8 @@ class DocumentService:
             "rag_query_completed",
             question_length=len(question),
             chunks_used=len(chunks),
+            chunk_sources=sources,
+            answer=llm_response.content,
             model=model,
             input_tokens=llm_response.input_tokens,
             output_tokens=llm_response.output_tokens,
