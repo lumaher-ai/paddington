@@ -79,3 +79,6 @@ class DocumentService:
         )
 
         return document
+
+    async def list_user_documents(self, user_id: UUID) -> list[Document]:
+        return await self._repository.list_documents_by_user(user_id)
