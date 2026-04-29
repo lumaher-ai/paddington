@@ -119,8 +119,10 @@ def get_document_repository(
 def get_document_service(
     repository: DocumentRepository = Depends(get_document_repository),
     embedding_service: EmbeddingService = Depends(get_embedding_service),
+    llm_client: LLMClient = Depends(get_llm_client),
 ) -> DocumentService:
     return DocumentService(
         repository=repository,
         embedding_service=embedding_service,
+        llm_client=llm_client,
     )

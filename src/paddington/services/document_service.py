@@ -2,11 +2,12 @@ from uuid import UUID
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from paddington.llm.client import count_tokens
+from paddington.llm.client import LLMClient, count_tokens
 from paddington.llm.embedding_service import EmbeddingService
 from paddington.logging_config import get_logger
 from paddington.models.document import Document
 from paddington.repositories.document_repository import DocumentRepository
+from paddington.schemas.document import ChunkSource, QueryResponse
 
 logger = get_logger(__name__)
 
@@ -14,19 +15,113 @@ logger = get_logger(__name__)
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 
+# Prompt
+
+RAG_SYSTEM_PROMPT = """You are an assistant that answers questions based on the provided context.
+
+RULES:
+- Answer ONLY based on the context provided below.
+- If the context doesn't contain enough information to answer, say: 
+"I don't have enough information to answer that question based on the available documents."
+- Do NOT make up information that isn't in the context.
+- Cite which parts of the context you're using in your answer.
+- Be concise and direct.
+
+CONTEXT:
+{context}"""
+
 
 class DocumentService:
     def __init__(
         self,
         repository: DocumentRepository,
         embedding_service: EmbeddingService,
+        llm_client: LLMClient,
     ) -> None:
         self._repository = repository
         self._embedding_service = embedding_service
+        self._llm = llm_client
         self._splitter = RecursiveCharacterTextSplitter(
             chunk_size=CHUNK_SIZE,
             chunk_overlap=CHUNK_OVERLAP,
             separators=["\n\n", "\n", ". ", " ", ""],
+        )
+
+    async def query(
+        self,
+        question: str,
+        user_id: UUID,
+        top_k: int = 5,
+        model: str = "gpt-4o-mini",
+    ) -> QueryResponse:
+        """Full RAG pipeline: embed query → search → build prompt → generate answer."""
+        # Step 1: Embed the question
+        query_embedding = await self._embedding_service.embed_text(question)
+
+        # Step 2: Find similar chunks
+        chunks = await self._repository.search_similar_chunks(
+            query_embedding=query_embedding,
+            user_id=user_id,
+            top_k=top_k,
+        )
+
+        if not chunks:
+            return QueryResponse(
+                answer="No documents found. Please upload documents first.",
+                sources=[],
+                model=model,
+                input_tokens=0,
+                output_tokens=0,
+                cost_usd=0.0,
+            )
+
+        # Step 3: Build context from chunks
+        context_parts = []
+        for i, chunk in enumerate(chunks):
+            document = await self._repository.get_document_by_id(chunk.document_id)
+            context_parts.append(f"[Source {i + 1}: {document.title}]\n{chunk.content}")
+        context = "\n\n---\n\n".join(context_parts)
+
+        # Step 4: Call LLM with context
+        system_prompt = RAG_SYSTEM_PROMPT.format(context=context)
+        llm_response = await self._llm.chat(
+            messages=[{"role": "user", "content": question}],
+            system=system_prompt,
+            model=model,
+        )
+
+        # Step 5: Build response with sources
+        sources = []
+        for i, chunk in enumerate(chunks):
+            document = await self._repository.get_document_by_id(chunk.document_id)
+            sources.append(
+                ChunkSource(
+                    chunk_id=chunk.id,
+                    document_title=document.title,
+                    content_preview=chunk.content[:200] + "..."
+                    if len(chunk.content) > 200
+                    else chunk.content,
+                    similarity_rank=i + 1,
+                )
+            )
+
+        logger.info(
+            "rag_query_completed",
+            question_length=len(question),
+            chunks_used=len(chunks),
+            model=model,
+            input_tokens=llm_response.input_tokens,
+            output_tokens=llm_response.output_tokens,
+            cost_usd=llm_response.cost_usd,
+        )
+
+        return QueryResponse(
+            answer=llm_response.content,
+            sources=sources,
+            model=llm_response.model,
+            input_tokens=llm_response.input_tokens,
+            output_tokens=llm_response.output_tokens,
+            cost_usd=llm_response.cost_usd,
         )
 
     async def ingest_document(

@@ -2,7 +2,12 @@ from fastapi import APIRouter, Depends, status
 
 from paddington.dependencies import get_current_user, get_document_service
 from paddington.models import User
-from paddington.schemas.document import DocumentResponse, DocumentUploadRequest
+from paddington.schemas.document import (
+    DocumentResponse,
+    DocumentUploadRequest,
+    QueryRequest,
+    QueryResponse,
+)
 from paddington.services.document_service import DocumentService
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -24,6 +29,19 @@ async def upload_document(
         user_id=current_user.id,
     )
     return DocumentResponse.model_validate(document)
+
+
+@router.post("/query", response_model=QueryResponse)
+async def query_documents(
+    data: QueryRequest,
+    current_user: User = Depends(get_current_user),
+    service: DocumentService = Depends(get_document_service),
+) -> QueryResponse:
+    return await service.query(
+        question=data.question,
+        user_id=current_user.id,
+        top_k=data.top_k,
+    )
 
 
 @router.get("", response_model=list[DocumentResponse])
