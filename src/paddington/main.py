@@ -7,7 +7,7 @@ from paddington.config import get_settings
 from paddington.database import close_db, init_db
 from paddington.exception_handlers import register_exception_handlers
 from paddington.logging_config import configure_logging, get_logger
-from paddington.routes import auth, chat, documents, echo, health, users
+from paddington.routes import agent, auth, chat, documents, echo, health, users
 
 configure_logging()
 
@@ -40,3 +40,4 @@ app.include_router(users.router)
 app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(documents.router)
+app.include_router(agent.router)
