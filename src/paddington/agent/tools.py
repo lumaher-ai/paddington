@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from openai.types.chat import ChatCompletionFunctionToolParam
+
 from paddington.llm.embedding_service import EmbeddingService
 from paddington.repositories.document_repository import DocumentRepository
 
@@ -87,7 +89,7 @@ class PaddingtonTools:
             ),
         ]
 
-    def get_openai_schemas(self) -> list[dict]:
+    def get_openai_schemas(self) -> list[ChatCompletionFunctionToolParam]:
         """Convert tool definitions to OpenAI function calling format."""
         return [
             {
