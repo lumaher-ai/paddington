@@ -205,3 +205,28 @@
 
 **Tomorrow:**
 - Day 10: More RAG refinements, or begin tool calling if RAG is solid
+
+## Day 10 — [04/24/2026]
+
+**Done:**
+- Learned tool calling protocol for OpenAI and Anthropic
+- Built manual agent loop from scratch (exercises 11, 12)
+- Understood the observe → think → check → act cycle
+- Created PaddingtonTools with 3 real tools over pgvector data
+- Built production AgentLoop with iteration limits, cost budgets, error recovery
+- Created POST /agent/run endpoint with auth protection
+
+**Key concepts I can now explain:**
+- The LLM doesn't execute tools — it decides WHICH tool to call with WHAT arguments; your code executes
+- tool_call_id links each result to the call that originated it (critical for parallel calls)
+- The agent loop is the same pattern for every AI agent: ChatGPT, Claude, Cursor, paddington
+- Budget limits prevent runaway costs; iteration limits prevent infinite loops
+- Tool errors should be passed to the LLM, not crash the agent
+
+**OpenAI vs Anthropic tool calling differences:**
+- Schema format: "parameters" (OpenAI) vs "input_schema" (Anthropic)
+- Stop signal: "tool_calls" (OpenAI) vs "tool_use" (Anthropic)
+- Result role: "tool" (OpenAI) vs "user" with tool_result blocks (Anthropic)
+
+**Tomorrow:**
+- Day 11: LangGraph — refactor the agent loop into a state graph, add persistence
