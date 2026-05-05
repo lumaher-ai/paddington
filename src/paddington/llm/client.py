@@ -1,15 +1,15 @@
 import time
 from dataclasses import dataclass
-from sqlite3 import apilevel
 
 import litellm
 import tiktoken
-from litellm import acompletion, completion_cost, num_retries
+from litellm import acompletion, completion_cost
 from litellm.exceptions import (
     APIConnectionError,
     RateLimitError,
     ServiceUnavailableError,
 )
+from litellm.types.utils import ModelResponse
 
 from paddington.config import get_settings
 from paddington.logging_config import get_logger
@@ -106,10 +106,14 @@ class LLMClient:
 
         latency_ms = (time.perf_counter() - start_time) * 1000
 
+        # acompletion returns ModelResponse | CustomStreamWrapper; we never
+        # set stream=True, so narrow the union (and fail fast otherwise).
+        assert isinstance(response, ModelResponse)
+
         # Extract response data
         choice = response.choices[0]
         content = choice.message.content or ""
-        usage = response.usage
+        usage = getattr(response, "usage", None)
 
         # Calculate cost using LiteLLM's built-in pricing
         try:
