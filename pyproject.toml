@@ -12,6 +12,7 @@ dependencies = [
     "fastapi>=0.135.3",
     "greenlet>=3.4.0",
     "langchain-text-splitters>=1.1.2",
+    "litellm>=1.83.0",
     "openai>=2.32.0",
     "passlib[argon2]>=1.7.4",
     "pgvector>=0.4.2",
