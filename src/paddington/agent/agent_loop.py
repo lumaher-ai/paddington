@@ -86,9 +86,10 @@ class AgentLoop:
             choice = response.choices[0]
 
             # Track cost using LiteLLM's built-in calculation
-            if response.usage:
-                total_input_tokens += response.usage.prompt_tokens
-                total_output_tokens += response.usage.completion_tokens
+            usage = getattr(response, "usage", None)
+            if usage:
+                total_input_tokens += usage.prompt_tokens
+                total_output_tokens += usage.completion_tokens
                 try:
                     from litellm import completion_cost
 
@@ -135,6 +136,8 @@ class AgentLoop:
                     if tool_call.type != "function":
                         continue
                     func_name = tool_call.function.name
+                    if func_name is None:
+                        continue
                     try:
                         func_args = json.loads(tool_call.function.arguments)
                     except json.JSONDecodeError:

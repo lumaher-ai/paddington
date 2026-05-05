@@ -10,7 +10,6 @@ from litellm.exceptions import (
     ServiceUnavailableError,
 )
 from litellm.types.utils import ModelResponse
-from openai.types.chat import ChatCompletionFunctionToolParam
 
 from paddington.config import get_settings
 from paddington.logging_config import get_logger
@@ -152,12 +151,12 @@ class LLMClient:
     async def chat_with_tools(
         self,
         messages: list[dict],
-        tools: list[ChatCompletionFunctionToolParam],
+        tools: list[dict],
         model: str | None = None,
         system: str | None = None,
         max_tokens: int = 1024,
         temperature: float = 0.0,
-    ):
+    ) -> ModelResponse:
         """Send a completion with tools and return the raw response.
 
         Returns the raw LiteLLM response (OpenAI format) for the agent loop
@@ -179,6 +178,10 @@ class LLMClient:
             num_retries=3,
             fallbacks=[self._settings.fallback_model],
         )
+
+        # acompletion returns ModelResponse | CustomStreamWrapper; we never
+        # set stream=True, so narrow the union (and fail fast otherwise).
+        assert isinstance(response, ModelResponse)
 
         return response
 
