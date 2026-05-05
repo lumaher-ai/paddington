@@ -89,8 +89,8 @@ class PaddingtonTools:
             ),
         ]
 
-    def get_openai_schemas(self) -> list[ChatCompletionFunctionToolParam]:
-        """Convert tool definitions to OpenAI function calling format."""
+    def get_tool_schemas(self) -> list[dict]:
+        """Return tool schemas in OpenAI format (LiteLLM standard)."""
         return [
             {
                 "type": "function",
@@ -99,17 +99,6 @@ class PaddingtonTools:
                     "description": tool.description,
                     "parameters": tool.parameters,
                 },
-            }
-            for tool in self.get_all_tools()
-        ]
-
-    def get_anthropic_schemas(self) -> list[dict]:
-        """Convert tool definitions to Anthropic tool use format."""
-        return [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.parameters,
             }
             for tool in self.get_all_tools()
         ]

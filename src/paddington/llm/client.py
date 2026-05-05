@@ -10,6 +10,7 @@ from litellm.exceptions import (
     ServiceUnavailableError,
 )
 from litellm.types.utils import ModelResponse
+from openai.types.chat import ChatCompletionFunctionToolParam
 
 from paddington.config import get_settings
 from paddington.logging_config import get_logger
@@ -151,7 +152,7 @@ class LLMClient:
     async def chat_with_tools(
         self,
         messages: list[dict],
-        tools: list[dict],
+        tools: list[ChatCompletionFunctionToolParam],
         model: str | None = None,
         system: str | None = None,
         max_tokens: int = 1024,
