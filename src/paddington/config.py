@@ -31,8 +31,6 @@ class Settings(BaseSettings):
         description="Async PostgreSQL connection URL",
     )
 
-    # Dentro de la clase Settings, después de database_url
-
     # Auth
     jwt_secret_key: str = Field(
         default="CHANGE-ME-IN-PRODUCTION-use-a-real-random-string",
@@ -44,6 +42,16 @@ class Settings(BaseSettings):
 
     openai_api_key: str = Field(default="", description="OpenAI API key")
     anthropic_api_key: str = Field(default="", description="Anthropic API key")
+
+    # LLM for LiteLLM
+    default_model: str = Field(
+        default="gpt-4o-mini",
+        description="Default LLM model for completions",
+    )
+    fallback_model: str = Field(
+        default="claude-sonnet-4-20250514",
+        description="Fallback model if primary fails",
+    )
 
 
 @lru_cache

@@ -1,14 +1,9 @@
 import json
 from dataclasses import dataclass
 
-from openai import AsyncOpenAI, omit
-from openai.types.chat import (
-    ChatCompletionMessageParam,
-)
-
 from paddington.agent.tools import PaddingtonTools
-from paddington.config import get_settings
 from paddington.exceptions import PaddingtonError
+from paddington.llm.client import LLMClient
 from paddington.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -48,15 +43,16 @@ class AgentConfig:
 class AgentLoop:
     """A production-grade agent loop with tool calling, budgeting, and logging."""
 
-    def __init__(self, tools: PaddingtonTools, config: AgentConfig | None = None) -> None:
+    def __init__(
+        self, tools: PaddingtonTools, llm_client: LLMClient, config: AgentConfig | None = None
+    ) -> None:
         self._tools = tools
+        self._llm = llm_client
         self._config = config or AgentConfig()
-        settings = get_settings()
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
 
     async def run(self, user_message: str) -> AgentResult:
         """Execute the agent loop until completion or budget exhaustion."""
-        messages: list[ChatCompletionMessageParam] = [
+        messages = [
             {"role": "system", "content": self._config.system_prompt},
             {"role": "user", "content": user_message},
         ]
@@ -67,7 +63,7 @@ class AgentLoop:
         total_cost = 0.0
         iteration = 0
 
-        tool_schemas = self._tools.get_openai_schemas()
+        tool_schemas = self._tools.get_tool_schemas()
 
         while iteration < self._config.max_iterations:
             iteration += 1
@@ -79,29 +75,28 @@ class AgentLoop:
                 accumulated_cost=round(total_cost, 6),
             )
 
-            # OBSERVE + THINK
-            response = await self._client.chat.completions.create(
-                model=self._config.model,
+            # OBSERVE + THINK — through LiteLLM (provider-agnostic)
+            response = await self._llm.chat_with_tools(
                 messages=messages,
-                tools=tool_schemas if tool_schemas else omit,
+                tools=tool_schemas,
+                model=self._config.model,
                 temperature=0.0,
             )
 
             choice = response.choices[0]
 
-            # Track tokens and cost
-            if response.usage:
-                total_input_tokens += response.usage.prompt_tokens
-                total_output_tokens += response.usage.completion_tokens
-                # Simplified cost calc — in production use your LLMClient's pricing
-                from paddington.llm.client import _calculate_cost
+            # Track cost using LiteLLM's built-in calculation
+            usage = getattr(response, "usage", None)
+            if usage:
+                total_input_tokens += usage.prompt_tokens
+                total_output_tokens += usage.completion_tokens
+                try:
+                    from litellm import completion_cost
 
-                iteration_cost = _calculate_cost(
-                    self._config.model,
-                    response.usage.prompt_tokens,
-                    response.usage.completion_tokens,
-                )
-                total_cost += iteration_cost
+                    iteration_cost = completion_cost(completion_response=response)
+                    total_cost += iteration_cost
+                except Exception:
+                    pass
 
             # CHECK budget
             if total_cost > self._config.max_cost_usd:
@@ -133,13 +128,16 @@ class AgentLoop:
                 )
 
             # ACT: execute tool calls
-            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-                messages.append(choice.message)  # type: ignore
+            tool_calls = choice.message.tool_calls
+            if tool_calls:
+                messages.append(choice.message.model_dump())
 
-                for tool_call in choice.message.tool_calls:
+                for tool_call in tool_calls:
                     if tool_call.type != "function":
                         continue
                     func_name = tool_call.function.name
+                    if func_name is None:
+                        continue
                     try:
                         func_args = json.loads(tool_call.function.arguments)
                     except json.JSONDecodeError:

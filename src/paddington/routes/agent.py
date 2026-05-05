@@ -6,7 +6,9 @@ from paddington.dependencies import (
     get_current_user,
     get_document_repository,
     get_embedding_service,
+    get_llm_client,
 )
+from paddington.llm.client import LLMClient
 from paddington.llm.embedding_service import EmbeddingService
 from paddington.models import User
 from paddington.repositories.document_repository import DocumentRepository
@@ -21,6 +23,7 @@ async def run_agent(
     current_user: User = Depends(get_current_user),
     doc_repo: DocumentRepository = Depends(get_document_repository),
     embedding_service: EmbeddingService = Depends(get_embedding_service),
+    llm_client: LLMClient = Depends(get_llm_client),
 ) -> AgentRunResponse:
     tools = PaddingtonTools(
         document_repository=doc_repo,
@@ -33,7 +36,7 @@ async def run_agent(
         max_iterations=data.max_iterations,
     )
 
-    agent = AgentLoop(tools=tools, config=config)
+    agent = AgentLoop(tools=tools, llm_client=llm_client, config=config)
     result = await agent.run(user_message=data.message)
 
     return AgentRunResponse(

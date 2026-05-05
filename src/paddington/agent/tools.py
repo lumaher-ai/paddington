@@ -1,8 +1,7 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
-
-from openai.types.chat import ChatCompletionFunctionToolParam
 
 from paddington.llm.embedding_service import EmbeddingService
 from paddington.repositories.document_repository import DocumentRepository
@@ -89,8 +88,8 @@ class PaddingtonTools:
             ),
         ]
 
-    def get_openai_schemas(self) -> list[ChatCompletionFunctionToolParam]:
-        """Convert tool definitions to OpenAI function calling format."""
+    def get_tool_schemas(self) -> list[dict]:
+        """Return tool schemas in OpenAI format (LiteLLM standard)."""
         return [
             {
                 "type": "function",
@@ -103,18 +102,7 @@ class PaddingtonTools:
             for tool in self.get_all_tools()
         ]
 
-    def get_anthropic_schemas(self) -> list[dict]:
-        """Convert tool definitions to Anthropic tool use format."""
-        return [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.parameters,
-            }
-            for tool in self.get_all_tools()
-        ]
-
-    def get_handler(self, tool_name: str):
+    def get_handler(self, tool_name: str) -> Callable[..., Awaitable[str]] | None:
         """Look up a tool handler by name."""
         for tool in self.get_all_tools():
             if tool.name == tool_name:
