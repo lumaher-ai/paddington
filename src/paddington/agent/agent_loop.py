@@ -174,7 +174,6 @@ class AgentLoop:
                         }
                     )
 
-        # Exceeded max iterations
         logger.warning(
             "agent_max_iterations",
             iterations=iteration,
