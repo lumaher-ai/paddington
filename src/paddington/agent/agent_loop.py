@@ -5,6 +5,7 @@ import litellm
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_litellm import ChatLiteLLM
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -71,7 +72,7 @@ class AgentLoop:
         self._checkpointer = checkpointer
         self._graph = self._build_graph(tools)
 
-    def _build_graph(self, tools: list[BaseTool]) -> CompiledStateGraph:
+    def _build_graph(self, tools: list[BaseTool]) -> CompiledStateGraph[Any, Any, Any, Any]:
         settings = get_settings()
         model = ChatLiteLLM(
             model=self._config.model,
@@ -89,7 +90,7 @@ class AgentLoop:
         )
 
     async def run(self, user_message: str, thread_id: str) -> AgentResult:
-        invoke_config = {
+        invoke_config: RunnableConfig = {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": self._config.max_iterations * 2,
         }

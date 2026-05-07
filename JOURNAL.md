@@ -230,3 +230,48 @@
 
 **Tomorrow:**
 - Day 11: LangGraph — refactor the agent loop into a state graph, add persistence
+
+## Day 11 — [04/27/2026]
+
+**Done:**
+-  Replaced a hand-rolled LangGraph StateGraph plus raw LiteLLM acompletion calls with the high-level
+ langchain.agents.create_agent API backed by ChatLiteLLM.
+- Deleted the manual the LangChain ↔ OpenAI dict message converter
+- Deleted the custom PaddingtonTools registry
+- Tools are now plain @tool-decorated async functions produced by a build_paddington_tools(...) factory that closes over the user's repo and embedding service. 
+- The budget gate moved from a dedicated graph node into a BudgetMiddleware(AgentMiddleware) that runs
+ after_model.
+
+**Key concepts I can now explain:**
+- The old code mixed two paradigms — LangChain message types with raw LiteLLM dicts — which forced a manual
+ translation layer in every node and reinvented the prebuilt ReAct loop, ToolNode, and @tool decorator that
+ LangGraph and LangChain already ship. 
+- More critically, the agent was stateless per-request even though an AsyncPostgresSaver was already created in app.state.checkpointer and never consumed making the agent starting with an empty message history, blocking any multi-turn product feature. 
+- The refactor unblocks four capabilities that the framework was always supposed to give:
+  - State persistence across HTTP requests (the agent now remembers prior turns)
+  - Crash recovery mid-execution via the same checkpoint
+  - Future human-in-the-loop interrupts via interrupt() on the same graph
+  - Per-user thread isolation without building a permissions table. 
+  
+- This refactors sets up the next features: multi-turn conversations over uploaded documents, and a future
+ Playwright-style multi-step browsing agent — without another rewrite of the loop.
+
+## Day 12 y 13 - [04/30/2026]
+
+**Done:**
+- Conversations persist between HTTP requests, with client-supplied thread_ids scoped server-side by user_id for tenant isolation.
+- The checkpointer injected via a typed Depends(get_checkpointer) rather than reaching into app.state directly
+- Allowed multi-turn conversations enabled end-to-end.
+- Bug fixed in the FastAPI lifespan via AsyncExitStack.
+
+**Architecture decisions**
+- create_agent (langchain v1) over the deprecated langgraph.prebuilt.create_react_agent to ride the official
+ direction and gain the middleware system. 
+- Budget enforcement per-turn instead of per-conversation, because cumulative budget breaks predictably on long conversations and the practical question is always "how much did this request cost." 
+- runtime.context rather than a state field for the baseline message count, because that value changes
+  per invocation and must not be checkpointed — LangGraph distinguishes "per-invocation data" (context) from "graph state" (state) explicitly. 
+- Server-side thread scoping via f"{user_id}:{client_thread_id}" instead of an ownership
+ table, since it's one line and makes the security invariant impossible to violate without a code change.
+- Depends(get_checkpointer) over direct app.state access in routes, to enable app.dependency_overrides for tests, give the route a typed signature, and confine the app.state.checkpointer name to a single source of truth in dependencies.py. 
+- AsyncExitStack in the lifespan because AsyncPostgresSaver.from_conn_string is an
+ @asynccontextmanager — any other shape either trips Pylance, closes the Postgres connection before requests can use it, or both.
