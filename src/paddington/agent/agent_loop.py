@@ -1,19 +1,28 @@
-import json
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
+import litellm
+from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware, AgentState
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import BaseTool
+from langchain_litellm import ChatLiteLLM
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
-from pydantic import BaseModel, Field
+from langgraph.runtime import Runtime
 
-from paddington.agent.tools import PaddingtonTools
+from paddington.config import get_settings
 from paddington.exceptions import PaddingtonError
-from paddington.llm.client import LLMClient
 from paddington.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+_DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful assistant with access to tools. "
+    "Use them when needed to answer the user's question accurately. "
+    "If you can answer without tools, do so directly. "
+    "Be concise and cite your sources when using search results."
+)
 
 
 class AgentBudgetExceededError(PaddingtonError):
@@ -33,274 +42,177 @@ class AgentResult:
 @dataclass
 class AgentConfig:
     model: str = "gpt-4o-mini"
-    max_iterations: int = 10
+    max_iterations: int = 3
     max_cost_usd: float = 0.50
-    system_prompt: str = (
-        "You are a helpful assistant with access to tools. "
-        "Use them when needed to answer the user's question accurately. "
-        "If you can answer without tools, do so directly. "
-        "Be concise and cite your sources when using search results."
-    )
+    system_prompt: str = _DEFAULT_SYSTEM_PROMPT
 
 
-class AgentState(BaseModel):
-    """State that flows through the LangGraph agent."""
+@dataclass
+class AgentInvocationContext:
+    """Per-invocation runtime context (NOT persisted in the checkpoint).
 
-    messages: Annotated[list[BaseMessage], add_messages] = Field(default_factory=list)
-    tools_used: list[str] = Field(default_factory=list)
-    iteration: int = 0
-    total_cost_usd: float = 0.0
-    total_input_tokens: int = 0
-    total_output_tokens: int = 0
-    is_budget_exceeded: bool = False
+    Tells the budget middleware how many messages already existed at the
+    start of this turn, so it can compute cost/tokens only from new messages.
+    """
+
+    baseline_message_count: int
 
 
 class AgentLoop:
-    """Production agent loop powered by LangGraph."""
+    """ReAct agent powered by LangGraph + ChatLiteLLM."""
 
     def __init__(
         self,
-        tools: PaddingtonTools,
-        llm_client: LLMClient,
+        tools: list[BaseTool],
         config: AgentConfig | None = None,
+        checkpointer: BaseCheckpointSaver | None = None,
     ) -> None:
-        self._tools = tools
-        self._llm = llm_client
         self._config = config or AgentConfig()
-        self._graph = self._build_graph()
+        self._checkpointer = checkpointer
+        self._graph = self._build_graph(tools)
 
-    def _build_graph(self) -> CompiledStateGraph:
-        graph = StateGraph(AgentState)
-
-        graph.add_node("call_llm", self._call_llm_node)
-        graph.add_node("execute_tools", self._execute_tools_node)
-        graph.add_node("check_budget", self._check_budget_node)
-
-        graph.add_edge(START, "call_llm")
-        graph.add_conditional_edges(
-            "call_llm",
-            self._route_after_llm,
-            {
-                "execute_tools": "check_budget",
-                "end": END,
-            },
-        )
-        graph.add_conditional_edges(
-            "check_budget",
-            self._route_after_budget_check,
-            {
-                "continue": "execute_tools",
-                "budget_exceeded": END,
-            },
-        )
-        graph.add_edge("execute_tools", "call_llm")
-
-        return graph.compile()
-
-    # ─── Nodes ───
-
-    async def _call_llm_node(self, state: AgentState) -> dict:
-        """Send conversation to the LLM via LiteLLM."""
-        messages_for_llm = self._convert_messages_for_litellm(state.messages)
-        tool_schemas = self._tools.get_tool_schemas()
-
-        response = await self._llm.chat_with_tools(
-            messages=messages_for_llm,
-            tools=tool_schemas,
+    def _build_graph(self, tools: list[BaseTool]) -> CompiledStateGraph:
+        settings = get_settings()
+        model = ChatLiteLLM(
             model=self._config.model,
-            system=self._config.system_prompt,
             temperature=0.0,
+            max_retries=3,
+            model_kwargs={"fallbacks": [settings.fallback_model]},
+        )
+        return create_agent(
+            model,
+            tools=tools,
+            system_prompt=self._config.system_prompt,
+            middleware=[BudgetMiddleware(self._config.max_cost_usd, self._config.model)],
+            context_schema=AgentInvocationContext,
+            checkpointer=self._checkpointer,
         )
 
-        choice = response.choices[0]
-
-        # Track cost
-        cost_increment = 0.0
-        input_tokens = 0
-        output_tokens = 0
-        usage = getattr(response, "usage", None)
-        if usage:
-            input_tokens = usage.prompt_tokens
-            output_tokens = usage.completion_tokens
-            try:
-                from litellm import completion_cost
-
-                cost_increment = completion_cost(completion_response=response)
-            except Exception:
-                pass
-
-        # Convert to LangChain message format
-        tool_calls = []
-        if choice.message.tool_calls:
-            for tc in choice.message.tool_calls:
-                tool_calls.append(
-                    {
-                        "id": tc.id,
-                        "name": tc.function.name,
-                        "args": json.loads(tc.function.arguments),
-                    }
-                )
-
-        ai_message = AIMessage(
-            content=choice.message.content or "",
-            tool_calls=tool_calls,
-        )
-
-        new_iteration = state.iteration + 1
-
-        logger.info(
-            "agent_iteration",
-            iteration=new_iteration,
-            has_tool_calls=len(tool_calls) > 0,
-            cost_increment=round(cost_increment, 6),
-            accumulated_cost=round(state.total_cost_usd + cost_increment, 6),
-        )
-
-        return {
-            "messages": [ai_message],
-            "iteration": new_iteration,
-            "total_cost_usd": state.total_cost_usd + cost_increment,
-            "total_input_tokens": state.total_input_tokens + input_tokens,
-            "total_output_tokens": state.total_output_tokens + output_tokens,
+    async def run(self, user_message: str, thread_id: str) -> AgentResult:
+        invoke_config = {
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": self._config.max_iterations * 2,
         }
 
-    async def _execute_tools_node(self, state: AgentState) -> dict:
-        """Execute all tool calls from the last AI message."""
-        last_message = state.messages[-1]
-        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
-            return {}
-
-        tool_messages = []
-        new_tools_used = []
-
-        for tool_call in last_message.tool_calls:
-            func_name = tool_call["name"]
-            func_args = tool_call["args"]
-
-            logger.info(
-                "agent_tool_call",
-                tool=func_name,
-                args=func_args,
-                iteration=state.iteration,
+        baseline = 0
+        if self._checkpointer is not None:
+            snapshot = await self._graph.aget_state(
+                {"configurable": {"thread_id": thread_id}}
             )
+            if snapshot and snapshot.values:
+                baseline = len(snapshot.values.get("messages", []))
 
-            handler = self._tools.get_handler(func_name)
-            if handler is None:
-                result = f"Error: unknown tool '{func_name}'"
-            else:
-                try:
-                    result = await handler(**func_args)
-                except Exception as e:
-                    logger.error("agent_tool_error", tool=func_name, error=str(e))
-                    result = f"Error executing {func_name}: {str(e)}"
+        final = await self._graph.ainvoke(
+            {"messages": [HumanMessage(content=user_message)]},
+            config=invoke_config,
+            context=AgentInvocationContext(baseline_message_count=baseline),
+        )
 
-            tool_messages.append(ToolMessage(content=result, tool_call_id=tool_call["id"]))
-            new_tools_used.append(func_name)
+        new_messages = final["messages"][baseline:]
+        total_cost, total_input, total_output = _accumulate_usage(
+            new_messages, self._config.model
+        )
 
-        return {
-            "messages": tool_messages,
-            "tools_used": state.tools_used + new_tools_used,
-        }
+        iterations = sum(1 for m in new_messages if isinstance(m, AIMessage))
+        tools_used = [
+            tc["name"]
+            for m in new_messages
+            if isinstance(m, AIMessage)
+            for tc in (m.tool_calls or [])
+        ]
+        answer = next(
+            (
+                m.content
+                for m in reversed(new_messages)
+                if isinstance(m, AIMessage)
+                and isinstance(m.content, str)
+                and m.content
+            ),
+            "",
+        )
 
-    async def _check_budget_node(self, state: AgentState) -> dict:
-        """Check if the agent has exceeded its budget."""
-        if state.total_cost_usd > self._config.max_cost_usd:
-            logger.warning(
-                "agent_budget_exceeded",
-                cost=round(state.total_cost_usd, 6),
-                budget=self._config.max_cost_usd,
-            )
-            return {"is_budget_exceeded": True}
-        return {}
-
-    # ─── Routing functions ───
-
-    def _route_after_llm(self, state: AgentState) -> str:
-        """Decide: did the LLM finish or does it want tools?"""
-        if state.iteration >= self._config.max_iterations:
-            logger.warning("agent_max_iterations", iterations=state.iteration)
-            return "end"
-
-        last_message = state.messages[-1]
-        if isinstance(last_message, AIMessage) and last_message.tool_calls:
-            return "execute_tools"
-
-        return "end"
-
-    def _route_after_budget_check(self, state: AgentState) -> str:
-        """Decide: is the budget still OK?"""
-        if state.is_budget_exceeded:
-            return "budget_exceeded"
-        return "continue"
-
-    # ─── Message conversion ───
-
-    def _convert_messages_for_litellm(self, messages: list[BaseMessage]) -> list[dict]:
-        """Convert LangChain messages to LiteLLM/OpenAI format."""
-        result = []
-        for msg in messages:
-            if isinstance(msg, HumanMessage):
-                result.append({"role": "user", "content": msg.content})
-            elif isinstance(msg, AIMessage):
-                msg_dict = {"role": "assistant", "content": msg.content or ""}
-                if msg.tool_calls:
-                    msg_dict["tool_calls"] = [
-                        {
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {
-                                "name": tc["name"],
-                                "arguments": json.dumps(tc["args"]),
-                            },
-                        }
-                        for tc in msg.tool_calls
-                    ]
-                result.append(msg_dict)
-            elif isinstance(msg, ToolMessage):
-                result.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": msg.tool_call_id,
-                        "content": msg.content,
-                    }
-                )
-        return result
-
-    # ─── Public API (same interface as before) ───
-
-    async def run(self, user_message: str) -> AgentResult:
-        """Execute the agent. Same interface as the manual loop."""
-        initial_state = {
-            "messages": [HumanMessage(content=user_message)],
-        }
-
-        final_state = await self._graph.ainvoke(initial_state)
-
-        # Extract the answer from the last AI message
-        answer = ""
-        for msg in reversed(final_state["messages"]):
-            if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content:
-                answer = msg.content
-                break
-
-        if final_state.get("is_budget_exceeded"):
+        if total_cost > self._config.max_cost_usd:
             raise AgentBudgetExceededError(
-                f"""Agent exceeded budget: ${final_state["total_cost_usd"]:.4f} > ${
-                    self._config.max_cost_usd:.2f}"""
+                f"Agent exceeded budget: ${total_cost:.4f} > ${self._config.max_cost_usd:.2f}"
             )
 
         logger.info(
             "agent_completed",
-            iterations=final_state["iteration"],
-            tools_used=final_state["tools_used"],
-            total_cost=round(final_state["total_cost_usd"], 6),
+            iterations=iterations,
+            tools_used=tools_used,
+            total_cost=round(total_cost, 6),
         )
 
         return AgentResult(
             answer=answer,
-            iterations=final_state["iteration"],
-            tools_used=final_state["tools_used"],
-            total_input_tokens=final_state["total_input_tokens"],
-            total_output_tokens=final_state["total_output_tokens"],
-            total_cost_usd=round(final_state["total_cost_usd"], 6),
+            iterations=iterations,
+            tools_used=tools_used,
+            total_input_tokens=total_input,
+            total_output_tokens=total_output,
+            total_cost_usd=round(total_cost, 6),
         )
+
+
+def _accumulate_usage(messages: list, model: str) -> tuple[float, int, int]:
+    """Sum cost + tokens across every AIMessage in the given slice."""
+    total_cost = 0.0
+    total_input = 0
+    total_output = 0
+    for msg in messages:
+        if not isinstance(msg, AIMessage) or not msg.usage_metadata:
+            continue
+        input_tokens = msg.usage_metadata.get("input_tokens", 0)
+        output_tokens = msg.usage_metadata.get("output_tokens", 0)
+        total_input += input_tokens
+        total_output += output_tokens
+        try:
+            in_cost, out_cost = litellm.cost_per_token(
+                model=model,
+                prompt_tokens=input_tokens,
+                completion_tokens=output_tokens,
+            )
+            total_cost += in_cost + out_cost
+        except Exception as e:
+            logger.warning("cost_calculation_failed", model=model, error=str(e))
+    return total_cost, total_input, total_output
+
+
+class BudgetMiddleware(AgentMiddleware):
+    """Halt the agent when *this turn's* LLM cost exceeds the configured budget.
+
+    Reads `runtime.context.baseline_message_count` to ignore messages from
+    previous turns when computing cost. If we're over budget and the model
+    just requested tools, strip the tool_calls so the loop terminates;
+    `AgentLoop.run` then raises `AgentBudgetExceededError`.
+    """
+
+    def __init__(self, max_cost_usd: float, model: str) -> None:
+        super().__init__()
+        self._max_cost_usd = max_cost_usd
+        self._model = model
+
+    def after_model(
+        self, state: AgentState, runtime: Runtime[AgentInvocationContext]
+    ) -> dict[str, Any] | None:
+        baseline = runtime.context.baseline_message_count if runtime.context else 0
+        new_messages = state["messages"][baseline:]
+        total_cost, _, _ = _accumulate_usage(new_messages, self._model)
+        if total_cost <= self._max_cost_usd:
+            return None
+
+        logger.warning(
+            "agent_budget_exceeded",
+            cost=round(total_cost, 6),
+            budget=self._max_cost_usd,
+        )
+        last = state["messages"][-1]
+        if isinstance(last, AIMessage) and last.tool_calls:
+            stripped = AIMessage(
+                id=last.id,
+                content=last.content
+                or "Stopped: budget exceeded before completing the answer.",
+                response_metadata=last.response_metadata,
+                usage_metadata=last.usage_metadata,
+            )
+            return {"messages": [stripped]}
+        return None
