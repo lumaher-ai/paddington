@@ -1,7 +1,8 @@
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from paddington.config import get_settings
 from paddington.database import close_db, init_db
@@ -19,8 +20,17 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await init_db()
-    logger.info("application_started")
-    yield
+
+    async with AsyncExitStack() as stack:
+        checkpointer = await stack.enter_async_context(
+            AsyncPostgresSaver.from_conn_string(get_settings().database_url)
+        )
+        await checkpointer.setup()
+        app.state.checkpointer = checkpointer
+
+        logger.info("application_started")
+        yield
+
     await close_db()
     logger.info("application_stopped")
 

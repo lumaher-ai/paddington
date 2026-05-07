@@ -1,14 +1,16 @@
+from uuid import uuid4
+
 from fastapi import APIRouter, Depends
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from paddington.agent.agent_loop import AgentConfig, AgentLoop
-from paddington.agent.tools import PaddingtonTools
+from paddington.agent.tools import build_paddington_tools
 from paddington.dependencies import (
+    get_checkpointer,
     get_current_user,
     get_document_repository,
     get_embedding_service,
-    get_llm_client,
 )
-from paddington.llm.client import LLMClient
 from paddington.llm.embedding_service import EmbeddingService
 from paddington.models import User
 from paddington.repositories.document_repository import DocumentRepository
@@ -23,9 +25,9 @@ async def run_agent(
     current_user: User = Depends(get_current_user),
     doc_repo: DocumentRepository = Depends(get_document_repository),
     embedding_service: EmbeddingService = Depends(get_embedding_service),
-    llm_client: LLMClient = Depends(get_llm_client),
+    checkpointer: BaseCheckpointSaver | None = Depends(get_checkpointer),
 ) -> AgentRunResponse:
-    tools = PaddingtonTools(
+    tools = build_paddington_tools(
         document_repository=doc_repo,
         embedding_service=embedding_service,
         user_id=current_user.id,
@@ -35,9 +37,12 @@ async def run_agent(
         model=data.model,
         max_iterations=data.max_iterations,
     )
+    agent = AgentLoop(tools=tools, config=config, checkpointer=checkpointer)
 
-    agent = AgentLoop(tools=tools, llm_client=llm_client, config=config)
-    result = await agent.run(user_message=data.message)
+    client_thread_id = data.thread_id or str(uuid4())
+    scoped_thread_id = f"{current_user.id}:{client_thread_id}"
+
+    result = await agent.run(user_message=data.message, thread_id=scoped_thread_id)
 
     return AgentRunResponse(
         answer=result.answer,
@@ -46,4 +51,5 @@ async def run_agent(
         total_input_tokens=result.total_input_tokens,
         total_output_tokens=result.total_output_tokens,
         total_cost_usd=result.total_cost_usd,
+        thread_id=client_thread_id,
     )

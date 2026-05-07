@@ -1,8 +1,9 @@
 from collections.abc import AsyncIterator, Callable
 from uuid import UUID
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from paddington.database import get_session
@@ -114,6 +115,10 @@ def get_document_repository(
     session: AsyncSession = Depends(get_db_session),
 ) -> DocumentRepository:
     return DocumentRepository(session)
+
+
+def get_checkpointer(request: Request) -> BaseCheckpointSaver | None:
+    return getattr(request.app.state, "checkpointer", None)
 
 
 def get_document_service(
