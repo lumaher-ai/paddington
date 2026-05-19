@@ -10,7 +10,9 @@ from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from playwright.async_api import async_playwright
 
+from paddington.browser.browser_session import BrowserSession
 from paddington.config import get_settings
 from paddington.database import close_db, init_db
 from paddington.exception_handlers import register_exception_handlers
@@ -34,6 +36,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         await checkpointer.setup()
         app.state.checkpointer = checkpointer
+
+        playwright = await stack.enter_async_context(async_playwright())
+        browser = await playwright.chromium.launch()
+        stack.push_async_callback(browser.close)
+        context = await browser.new_context()
+        stack.push_async_callback(context.close)
+        page = await context.new_page()
+        app.state.browser_session = BrowserSession(context, page)
 
         logger.info("application_started")
         yield

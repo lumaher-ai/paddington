@@ -5,7 +5,9 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from paddington.agent.agent_loop import AgentConfig, AgentLoop
 from paddington.agent.tools import build_paddington_tools
+from paddington.browser.browser_session import BrowserSession
 from paddington.dependencies import (
+    get_browser_session,
     get_checkpointer,
     get_current_user,
     get_document_repository,
@@ -26,10 +28,12 @@ async def run_agent(
     doc_repo: DocumentRepository = Depends(get_document_repository),
     embedding_service: EmbeddingService = Depends(get_embedding_service),
     checkpointer: BaseCheckpointSaver | None = Depends(get_checkpointer),
+    browser_session: BrowserSession = Depends(get_browser_session),
 ) -> AgentRunResponse:
     tools = build_paddington_tools(
         document_repository=doc_repo,
         embedding_service=embedding_service,
+        browser_session=browser_session,
         user_id=current_user.id,
     )
 
