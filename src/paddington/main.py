@@ -1,3 +1,10 @@
+# ruff: noqa: E402
+# load_dotenv() runs before any other import so .env is in os.environ
+# before modules like litellm read provider keys at import/call time.
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 
