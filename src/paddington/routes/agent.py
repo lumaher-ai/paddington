@@ -5,9 +5,9 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from paddington.agent.agent_loop import AgentConfig, AgentLoop
 from paddington.agent.tools import build_paddington_tools
-from paddington.browser.browser_session import BrowserSession
+from paddington.browser.browser_session import BrowserSessionManager
 from paddington.dependencies import (
-    get_browser_session,
+    get_browser_session_manager,
     get_checkpointer,
     get_current_user,
     get_document_repository,
@@ -28,8 +28,13 @@ async def run_agent(
     doc_repo: DocumentRepository = Depends(get_document_repository),
     embedding_service: EmbeddingService = Depends(get_embedding_service),
     checkpointer: BaseCheckpointSaver | None = Depends(get_checkpointer),
-    browser_session: BrowserSession = Depends(get_browser_session),
+    browser_session_manager: BrowserSessionManager = Depends(get_browser_session_manager),
 ) -> AgentRunResponse:
+    client_thread_id = data.thread_id or str(uuid4())
+    scoped_thread_id = f"{current_user.id}:{client_thread_id}"
+
+    browser_session = await browser_session_manager.get_or_create(scoped_thread_id)
+
     tools = build_paddington_tools(
         document_repository=doc_repo,
         embedding_service=embedding_service,
@@ -42,9 +47,6 @@ async def run_agent(
         max_iterations=data.max_iterations,
     )
     agent = AgentLoop(tools=tools, config=config, checkpointer=checkpointer)
-
-    client_thread_id = data.thread_id or str(uuid4())
-    scoped_thread_id = f"{current_user.id}:{client_thread_id}"
 
     result = await agent.run(user_message=data.message, thread_id=scoped_thread_id)
 

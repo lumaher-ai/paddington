@@ -5,8 +5,11 @@ import time
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 from playwright.async_api import (
+    Browser,
     BrowserContext,
     Page,
+    Playwright,
+    async_playwright,
 )
 from playwright.async_api import (
     Error as PlaywrightError,
@@ -208,7 +211,7 @@ class BrowserSession:
         ref: str,
         text: str,
         clear_first: bool = True,
-        press_enter: bool = False,
+        press_enter: bool = True,
         timeout_ms: int = 30_000,
     ) -> InputResult:
         start = time.perf_counter()
@@ -257,3 +260,49 @@ class BrowserSession:
             elapsed_ms=elapsed_ms,
             error=error,
         )
+
+
+class BrowserSessionManager:
+    """Owns the Playwright instance and the single browser process, and hands
+    out one BrowserSession per thread.
+
+    Self-contained async-context lifecycle (launch in __aenter__, teardown in
+    __aexit__) so the application entrypoint never has to know how a browser
+    starts or stops — same shape as the AsyncPostgresSaver checkpointer.
+    """
+
+    def __init__(self, headless: bool = True) -> None:
+        self._headless = headless
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._sessions: dict[str, BrowserSession] = {}
+
+    async def __aenter__(self) -> "BrowserSessionManager":
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(headless=self._headless)
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        for session in self._sessions.values():
+            with contextlib.suppress(PlaywrightError):
+                await session.context.close()  # closes the page too
+        self._sessions.clear()
+        if self._browser is not None:
+            with contextlib.suppress(PlaywrightError):
+                await self._browser.close()
+        if self._playwright is not None:
+            await self._playwright.stop()
+
+    async def get_or_create(self, thread_id: str) -> BrowserSession:
+        session = self._sessions.get(thread_id)
+        if session is None:
+            if self._browser is None:
+                raise RuntimeError(
+                    "BrowserSessionManager used outside its async context; "
+                    "enter it with `async with` (or AsyncExitStack) first."
+                )
+            context = await self._browser.new_context()
+            page = await context.new_page()
+            session = BrowserSession(context, page)
+            self._sessions[thread_id] = session
+        return session

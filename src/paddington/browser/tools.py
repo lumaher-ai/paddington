@@ -64,7 +64,7 @@ def build_browser_tools(session: BrowserSession) -> list[BaseTool]:
         ref: str,
         text: str,
         clear_first: bool = True,
-        press_enter: bool = False,
+        press_enter: bool = True,
         timeout_ms: int = 30_000,
     ) -> InputResult:
         """Type text into an input field identified by its ref.

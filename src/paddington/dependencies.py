@@ -6,7 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from paddington.browser.browser_session import BrowserSession
+from paddington.browser.browser_session import BrowserSessionManager
 from paddington.database import get_session
 from paddington.exceptions import ForbiddenError
 from paddington.llm.client import LLMClient
@@ -122,8 +122,8 @@ def get_checkpointer(request: Request) -> BaseCheckpointSaver | None:
     return getattr(request.app.state, "checkpointer", None)
 
 
-def get_browser_session(request: Request) -> BrowserSession:
-    return request.app.state.browser_session
+def get_browser_session_manager(request: Request) -> BrowserSessionManager:
+    return request.app.state.browser_session_manager
 
 
 def get_document_service(
