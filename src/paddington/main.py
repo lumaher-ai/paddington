@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     async with AsyncExitStack() as stack:
         checkpointer = await stack.enter_async_context(
-            AsyncPostgresSaver.from_conn_string(get_settings().database_url)
+            AsyncPostgresSaver.from_conn_string(get_settings().checkpointer_url)
         )
         await checkpointer.setup()
         app.state.checkpointer = checkpointer

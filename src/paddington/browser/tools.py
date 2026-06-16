@@ -17,7 +17,7 @@ def build_browser_tools(session: BrowserSession) -> list[BaseTool]:
     """
 
     @tool
-    async def navigate(
+    async def navigate_to(
         url: str,
         wait_until: str = "load",
         timeout_ms: int = 30_000,
@@ -86,4 +86,4 @@ def build_browser_tools(session: BrowserSession) -> list[BaseTool]:
             timeout_ms=timeout_ms,
         )
 
-    return [navigate, get_snapshot, click, input_text]
+    return [navigate_to, get_snapshot, click, input_text]

@@ -271,7 +271,7 @@ class BrowserSessionManager:
     starts or stops — same shape as the AsyncPostgresSaver checkpointer.
     """
 
-    def __init__(self, headless: bool = True) -> None:
+    def __init__(self, headless: bool = False) -> None:
         self._headless = headless
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None

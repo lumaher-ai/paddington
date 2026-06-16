@@ -31,6 +31,15 @@ class Settings(BaseSettings):
         description="Async PostgreSQL connection URL",
     )
 
+    @property
+    def checkpointer_url(self) -> str:
+        """psycopg-compatible URL for the LangGraph checkpointer.
+
+        SQLAlchemy selects its async driver via the ``+asyncpg`` tag, but
+        AsyncPostgresSaver is psycopg-based and rejects that tag — strip it.
+        """
+        return self.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
     # Auth
     jwt_secret_key: str = Field(
         default="CHANGE-ME-IN-PRODUCTION-use-a-real-random-string",
