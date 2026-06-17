@@ -1,9 +1,17 @@
+# ruff: noqa: E402
+# load_dotenv() runs before any other import so .env is in os.environ
+# before modules like litellm read provider keys at import/call time.
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
+from paddington.browser.browser_session import BrowserSessionManager
 from paddington.config import get_settings
 from paddington.database import close_db, init_db
 from paddington.exception_handlers import register_exception_handlers
@@ -23,10 +31,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     async with AsyncExitStack() as stack:
         checkpointer = await stack.enter_async_context(
-            AsyncPostgresSaver.from_conn_string(get_settings().database_url)
+            AsyncPostgresSaver.from_conn_string(get_settings().checkpointer_url)
         )
         await checkpointer.setup()
         app.state.checkpointer = checkpointer
+
+        manager = await stack.enter_async_context(BrowserSessionManager())
+        app.state.browser_session_manager = manager
 
         logger.info("application_started")
         yield

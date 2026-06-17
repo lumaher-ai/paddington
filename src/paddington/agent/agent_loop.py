@@ -4,11 +4,12 @@ from typing import Any
 import litellm
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, AgentState
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_litellm import ChatLiteLLM
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 
@@ -18,16 +19,38 @@ from paddington.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-_DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful assistant with access to tools. "
-    "Use them when needed to answer the user's question accurately. "
-    "If you can answer without tools, do so directly. "
-    "Be concise and cite your sources when using search results."
-)
+_DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant with access to tools.
+Use them when needed to answer the user's question accurately.
+If you can answer without tools, do so directly.
+Be concise and cite your sources when using search results.
+
+## Browser tools
+
+You can navigate and interact with real websites.
+Follow this workflow:
+
+1. Call navigate_to to go to a URL
+2. Call get_snapshot to see the page content and available interactive elements
+3. Each element has a ref (like "el_9") — use these refs in click_element and input_text
+4. After EVERY action (click, input), call get_snapshot again — the page has changed
+5. NEVER guess a ref — only use refs from the most recent snapshot
+6. If a ref fails, call get_snapshot to get fresh refs and retry
+
+When asked to find information on a website, navigate there, interact as needed,
+and extract the specific data requested. Return structured results.
+"""
 
 
 class AgentBudgetExceededError(PaddingtonError):
     status_code = 429
+
+
+class AgentRecursionLimitError(PaddingtonError):
+    status_code = 422
+
+
+class AgentExecutionError(PaddingtonError):
+    status_code = 502
 
 
 @dataclass
@@ -57,6 +80,42 @@ class AgentInvocationContext:
     """
 
     baseline_message_count: int
+
+
+_INTERRUPTED_TOOL_RESULT = (
+    "The previous tool call did not complete because the run was interrupted. "
+    "Retry the action if it is still needed."
+)
+
+
+def _dangling_tool_messages(messages: list[BaseMessage]) -> list[ToolMessage]:
+    """Return synthetic ToolMessages for any tool_call left without a result.
+
+    An interruption mid-tool-execution (a crashing tool, a process kill, a
+    recursion/budget abort) can leave an AIMessage whose tool_calls were never
+    answered by a ToolMessage. Replaying that history makes the OpenAI/Anthropic
+    APIs reject the request ("tool_call_ids did not have response messages"). We
+    synthesize a placeholder result per dangling id so the history is valid again.
+    """
+    answered = {
+        m.tool_call_id for m in messages if isinstance(m, ToolMessage)
+    }
+    repairs: list[ToolMessage] = []
+    for m in messages:
+        if not isinstance(m, AIMessage):
+            continue
+        for call in m.tool_calls or []:
+            call_id = call.get("id")
+            if call_id and call_id not in answered:
+                repairs.append(
+                    ToolMessage(
+                        tool_call_id=call_id,
+                        name=call.get("name"),
+                        content=_INTERRUPTED_TOOL_RESULT,
+                    )
+                )
+                answered.add(call_id)
+    return repairs
 
 
 class AgentLoop:
@@ -96,23 +155,48 @@ class AgentLoop:
         }
 
         baseline = 0
+        dangling: list[ToolMessage] = []
         if self._checkpointer is not None:
-            snapshot = await self._graph.aget_state(
-                {"configurable": {"thread_id": thread_id}}
-            )
+            snapshot = await self._graph.aget_state({"configurable": {"thread_id": thread_id}})
             if snapshot and snapshot.values:
-                baseline = len(snapshot.values.get("messages", []))
+                messages = snapshot.values.get("messages", [])
+                baseline = len(messages)
 
-        final = await self._graph.ainvoke(
-            {"messages": [HumanMessage(content=user_message)]},
-            config=invoke_config,
-            context=AgentInvocationContext(baseline_message_count=baseline),
-        )
+                # Repair any tool_call left unanswered by a prior interrupted run.
+                # Without this, the persisted history is invalid and every future
+                # request on this thread is rejected by the LLM API. We inject the
+                # synthetic results into this turn's input so the add_messages
+                # reducer appends them right after the dangling tool_call, before
+                # the new user message.
+                dangling = _dangling_tool_messages(messages)
+                if dangling:
+                    logger.warning(
+                        "repaired_dangling_tool_calls",
+                        thread_id=thread_id,
+                        count=len(dangling),
+                    )
+
+        try:
+            final = await self._graph.ainvoke(
+                {"messages": [*dangling, HumanMessage(content=user_message)]},
+                config=invoke_config,
+                context=AgentInvocationContext(baseline_message_count=baseline),
+            )
+        except GraphRecursionError as exc:
+            logger.warning(
+                "agent_recursion_limit_reached",
+                max_iterations=self._config.max_iterations,
+                recursion_limit=invoke_config["recursion_limit"],
+                thread_id=thread_id,
+            )
+            raise AgentRecursionLimitError(
+                f"Agent stopped after reaching its step limit "
+                f"(max_iterations={self._config.max_iterations}) without finishing. "
+                f"Retry with a higher max_iterations for multi-step tasks like browsing."
+            ) from exc
 
         new_messages = final["messages"][baseline:]
-        total_cost, total_input, total_output = _accumulate_usage(
-            new_messages, self._config.model
-        )
+        total_cost, total_input, total_output = _accumulate_usage(new_messages, self._config.model)
 
         iterations = sum(1 for m in new_messages if isinstance(m, AIMessage))
         tools_used = [
@@ -125,9 +209,7 @@ class AgentLoop:
             (
                 m.content
                 for m in reversed(new_messages)
-                if isinstance(m, AIMessage)
-                and isinstance(m.content, str)
-                and m.content
+                if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content
             ),
             "",
         )
@@ -210,8 +292,7 @@ class BudgetMiddleware(AgentMiddleware):
         if isinstance(last, AIMessage) and last.tool_calls:
             stripped = AIMessage(
                 id=last.id,
-                content=last.content
-                or "Stopped: budget exceeded before completing the answer.",
+                content=last.content or "Stopped: budget exceeded before completing the answer.",
                 response_metadata=last.response_metadata,
                 usage_metadata=last.usage_metadata,
             )

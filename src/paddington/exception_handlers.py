@@ -21,3 +21,19 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=exc.status_code,
             content={"detail": exc.detail, "error_type": type(exc).__name__},
         )
+
+    @app.exception_handler(Exception)
+    async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        # Catch-all so the client always receives a structured JSON body instead
+        # of a raw stack-trace 500. The full traceback is logged server-side.
+        logger.error(
+            "unhandled_error",
+            error_type=type(exc).__name__,
+            detail=str(exc),
+            path=request.url.path,
+            exc_info=exc,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error", "error_type": type(exc).__name__},
+        )

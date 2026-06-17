@@ -2,23 +2,20 @@ from uuid import UUID
 
 from langchain_core.tools import BaseTool, tool
 
+from paddington.browser.browser_session import BrowserSession
+from paddington.browser.tools import build_browser_tools
 from paddington.llm.embedding_service import EmbeddingService
 from paddington.repositories.document_repository import DocumentRepository
 
 _DOC_TRUNCATE_CHARS = 5000
 
 
-def build_paddington_tools(
+def build_db_tools(
     document_repository: DocumentRepository,
     embedding_service: EmbeddingService,
     user_id: UUID,
 ) -> list[BaseTool]:
-    """Build the per-request tool list for the agent.
-
-    Each tool closes over the user's repo + embedding service so it can be
-    handed to LangGraph / a LangChain model directly via `bind_tools` or
-    `create_react_agent(tools=...)`.
-    """
+    """Tools that talk to Postgres / the document store."""
 
     @tool
     async def search_documents(query: str, top_k: int = 5) -> str:
@@ -85,3 +82,19 @@ def build_paddington_tools(
         return f"Title: {doc.title}\n\n{content}"
 
     return [search_documents, list_documents, get_document_content]
+
+
+def build_paddington_tools(
+    document_repository: DocumentRepository,
+    embedding_service: EmbeddingService,
+    browser_session: BrowserSession,
+    user_id: UUID,
+) -> list[BaseTool]:
+    """Assemble every tool the agent should have access to.
+
+    Each sub-module owns its own tools; this function is just the assembler
+    that combines them into the single list bound to the agent.
+    """
+    db_tools = build_db_tools(document_repository, embedding_service, user_id)
+    browser_tools = build_browser_tools(browser_session)
+    return db_tools + browser_tools
