@@ -146,17 +146,13 @@ class BrowserSession:
             # collecting elements, wait for the page to settle and try again.
             for attempt in range(2):
                 try:
-                    raw_elements: list[dict] = await self.page.evaluate(
-                        _COLLECT_INTERACTIVE_JS
-                    )
+                    raw_elements: list[dict] = await self.page.evaluate(_COLLECT_INTERACTIVE_JS)
                     break
                 except PlaywrightError:
                     if attempt == 1:
                         raise
                     with contextlib.suppress(PlaywrightError):
-                        await self.page.wait_for_load_state(
-                            "domcontentloaded", timeout=5_000
-                        )
+                        await self.page.wait_for_load_state("domcontentloaded", timeout=5_000)
 
             for el in raw_elements:
                 self._ref_map[el["ref"]] = f'[data-paddington-ref="{el["ref"]}"]'
@@ -201,6 +197,12 @@ class BrowserSession:
             truncated=truncated,
             returned_chars=len(markdown),
         )
+
+        # TEMP: print the markdown returned to the agent for debugging
+
+        print("=== get_snapshot markdown ===")
+        print(markdown)
+        print("=== end get_snapshot markdown ===")
 
         return PageSnapshot(
             url=self.page.url,
