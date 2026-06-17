@@ -18,6 +18,7 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
+from paddington.logging_config import get_logger
 from paddington.schemas.browser import (
     ClickResult,
     InputResult,
@@ -25,6 +26,8 @@ from paddington.schemas.browser import (
     NavigateResult,
     PageSnapshot,
 )
+
+logger = get_logger(__name__)
 
 _COLLECT_INTERACTIVE_JS = """
 () => {
@@ -132,12 +135,48 @@ class BrowserSession:
     async def get_snapshot(self, max_chars: int = 8_000) -> PageSnapshot:
         self._ref_map.clear()
 
-        raw_elements: list[dict] = await self.page.evaluate(_COLLECT_INTERACTIVE_JS)
-        for el in raw_elements:
-            self._ref_map[el["ref"]] = f'[data-paddington-ref="{el["ref"]}"]'
-        interactive_elements = [InteractiveElement(**el) for el in raw_elements]
+        # Let any in-flight navigation settle before we read the page. A snapshot
+        # issued mid-navigation otherwise tears down the JS execution context and
+        # raises "Execution context was destroyed" from page.evaluate().
+        with contextlib.suppress(PlaywrightError):
+            await self.page.wait_for_load_state("domcontentloaded", timeout=5_000)
 
-        html = await self.page.content()
+        try:
+            # Retry once on the navigation race: if the context is destroyed while
+            # collecting elements, wait for the page to settle and try again.
+            for attempt in range(2):
+                try:
+                    raw_elements: list[dict] = await self.page.evaluate(
+                        _COLLECT_INTERACTIVE_JS
+                    )
+                    break
+                except PlaywrightError:
+                    if attempt == 1:
+                        raise
+                    with contextlib.suppress(PlaywrightError):
+                        await self.page.wait_for_load_state(
+                            "domcontentloaded", timeout=5_000
+                        )
+
+            for el in raw_elements:
+                self._ref_map[el["ref"]] = f'[data-paddington-ref="{el["ref"]}"]'
+            interactive_elements = [InteractiveElement(**el) for el in raw_elements]
+
+            html = await self.page.content()
+            title = await self.page.title()
+        except PlaywrightError as e:
+            url = self.page.url
+            logger.warning("browser_snapshot_failed", url=url, error=str(e))
+            return PageSnapshot(
+                url=url,
+                title="",
+                markdown="",
+                interactive_elements=[],
+                truncated=False,
+                total_chars=0,
+                error=str(e),
+            )
+
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup(list(_NOISE_TAGS)):
             tag.decompose()
@@ -154,9 +193,18 @@ class BrowserSession:
         truncated = total_chars > max_chars
         markdown = markdown_clean[:max_chars] if truncated else markdown_clean
 
+        logger.info(
+            "browser_snapshot_captured",
+            url=self.page.url,
+            interactive_count=len(interactive_elements),
+            total_chars=total_chars,
+            truncated=truncated,
+            returned_chars=len(markdown),
+        )
+
         return PageSnapshot(
             url=self.page.url,
-            title=await self.page.title(),
+            title=title,
             markdown=markdown,
             interactive_elements=interactive_elements,
             truncated=truncated,

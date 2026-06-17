@@ -3,7 +3,11 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from paddington.agent.agent_loop import AgentConfig, AgentLoop
+from paddington.agent.agent_loop import (
+    AgentConfig,
+    AgentExecutionError,
+    AgentLoop,
+)
 from paddington.agent.tools import build_paddington_tools
 from paddington.browser.browser_session import BrowserSessionManager
 from paddington.dependencies import (
@@ -13,10 +17,14 @@ from paddington.dependencies import (
     get_document_repository,
     get_embedding_service,
 )
+from paddington.exceptions import PaddingtonError
 from paddington.llm.embedding_service import EmbeddingService
+from paddington.logging_config import get_logger
 from paddington.models import User
 from paddington.repositories.document_repository import DocumentRepository
 from paddington.schemas.agent import AgentRunRequest, AgentRunResponse
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -48,7 +56,24 @@ async def run_agent(
     )
     agent = AgentLoop(tools=tools, config=config, checkpointer=checkpointer)
 
-    result = await agent.run(user_message=data.message, thread_id=scoped_thread_id)
+    try:
+        result = await agent.run(user_message=data.message, thread_id=scoped_thread_id)
+    except PaddingtonError:
+        # Domain errors (recursion limit, budget, etc.) already carry the right
+        # status code — let the registered handler shape the response.
+        raise
+    except Exception as exc:
+        # An unexpected failure inside a tool or the graph should surface as a
+        # structured error, not a naked 500 with a raw stack trace.
+        logger.error(
+            "agent_run_failed",
+            error_type=type(exc).__name__,
+            thread_id=scoped_thread_id,
+            exc_info=exc,
+        )
+        raise AgentExecutionError(
+            "The agent failed to complete the request due to an internal tool error."
+        ) from exc
 
     return AgentRunResponse(
         answer=result.answer,

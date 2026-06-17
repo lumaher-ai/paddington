@@ -49,6 +49,10 @@ class AgentRecursionLimitError(PaddingtonError):
     status_code = 422
 
 
+class AgentExecutionError(PaddingtonError):
+    status_code = 502
+
+
 @dataclass
 class AgentResult:
     answer: str

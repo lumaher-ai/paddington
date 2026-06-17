@@ -52,6 +52,10 @@ class PageSnapshot(BaseModel):
         ge=0,
         description="Original size of the markdown before truncating.",
     )
+    error: str | None = Field(
+        default=None,
+        description="Error message if the snapshot could not be captured.",
+    )
 
 
 class ClickResult(BaseModel):
