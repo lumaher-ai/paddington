@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import re
 import time
@@ -18,6 +19,7 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
+from paddington.browser.debug_recorder import DebugRecorder
 from paddington.logging_config import get_logger
 from paddington.schemas.browser import (
     ClickResult,
@@ -86,6 +88,25 @@ class BrowserSession:
         self.context = context
         self.page = page
         self._ref_map: dict[str, str] = {}
+        # Debug-only per-run screenshot trail; swapped in at the start of each
+        # /agent/run. None disables capture entirely (the default / prod path).
+        # No lock needed: a conversation is sequential, so runs on one session
+        # don't overlap.
+        self.recorder: DebugRecorder | None = None
+
+    async def _capture_debug(self, tool_name: str) -> None:
+        """Save a viewport screenshot to the debug trail; never break the run.
+
+        Calls page.screenshot directly (not self.screenshot) to avoid the
+        per-call info log and any chance of recursion.
+        """
+        if self.recorder is None:
+            return
+        try:
+            png = await self.page.screenshot(full_page=False, type="png")
+            self.recorder.write(tool_name, png)
+        except Exception as e:
+            logger.warning("debug_capture_failed", tool=tool_name, error=str(e))
 
     async def navigate(
         self,
@@ -123,6 +144,7 @@ class BrowserSession:
 
         ok = error is None and status < 400 and not self.page.is_closed()
 
+        await self._capture_debug("navigate")
         return NavigateResult(
             final_url=final_url,
             title=title,
@@ -204,6 +226,7 @@ class BrowserSession:
         print(markdown)
         print("=== end get_snapshot markdown ===")
 
+        await self._capture_debug("get_snapshot")
         return PageSnapshot(
             url=self.page.url,
             title=title,
@@ -212,6 +235,27 @@ class BrowserSession:
             truncated=truncated,
             total_chars=total_chars,
         )
+
+    async def screenshot(self, *, full_page: bool = False) -> bytes:
+        """Capture the current page as PNG bytes.
+
+        Mirrors get_snapshot's settle-before-read: let any in-flight navigation
+        reach a stable state so we don't screenshot a blank/transitional frame.
+        Raises PlaywrightError if the page is closed or the capture fails; the
+        caller (the tool) turns that into a text-only result.
+        """
+        with contextlib.suppress(PlaywrightError):
+            await self.page.wait_for_load_state("domcontentloaded", timeout=5_000)
+
+        png = await self.page.screenshot(full_page=full_page, type="png")
+
+        logger.info(
+            "browser_screenshot_captured",
+            url=self.page.url,
+            full_page=full_page,
+            size_bytes=len(png),
+        )
+        return png
 
     async def click(self, ref: str, timeout_ms: int = 30_000) -> ClickResult:
         start = time.perf_counter()
@@ -247,6 +291,7 @@ class BrowserSession:
 
         success = error is None and not self.page.is_closed()
 
+        await self._capture_debug("click")
         return ClickResult(
             success=success,
             previous_url=previous_url,
@@ -303,6 +348,7 @@ class BrowserSession:
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         success = error is None and not self.page.is_closed()
 
+        await self._capture_debug("input_text")
         return InputResult(
             success=success,
             ref=ref,
@@ -326,6 +372,9 @@ class BrowserSessionManager:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._sessions: dict[str, BrowserSession] = {}
+        # Guards the check-and-create in get_or_create so two concurrent
+        # requests can't both build a session (and leak a browser context).
+        self._lock = asyncio.Lock()
 
     async def __aenter__(self) -> "BrowserSessionManager":
         self._playwright = await async_playwright().start()
@@ -344,15 +393,24 @@ class BrowserSessionManager:
             await self._playwright.stop()
 
     async def get_or_create(self, thread_id: str) -> BrowserSession:
+        # Fast path: an existing session needs no lock (dict reads are safe
+        # between await points in a single event loop).
         session = self._sessions.get(thread_id)
-        if session is None:
-            if self._browser is None:
-                raise RuntimeError(
-                    "BrowserSessionManager used outside its async context; "
-                    "enter it with `async with` (or AsyncExitStack) first."
-                )
-            context = await self._browser.new_context()
-            page = await context.new_page()
-            session = BrowserSession(context, page)
-            self._sessions[thread_id] = session
+        if session is not None:
+            return session
+
+        # Slow path: serialize creation. Re-check inside the lock because another
+        # coroutine may have created the session while we waited for it.
+        async with self._lock:
+            session = self._sessions.get(thread_id)
+            if session is None:
+                if self._browser is None:
+                    raise RuntimeError(
+                        "BrowserSessionManager used outside its async context; "
+                        "enter it with `async with` (or AsyncExitStack) first."
+                    )
+                context = await self._browser.new_context()
+                page = await context.new_page()
+                session = BrowserSession(context, page)
+                self._sessions[thread_id] = session
         return session

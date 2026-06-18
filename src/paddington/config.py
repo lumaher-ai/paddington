@@ -62,6 +62,20 @@ class Settings(BaseSettings):
         description="Fallback model if primary fails",
     )
 
+    # Debug observability
+    debug_screenshots: bool = Field(
+        default=False,
+        description="Save per-step browser screenshots to disk for debugging",
+    )
+    debug_dir: str = Field(
+        default="debug_runs",
+        description="Root folder for debug screenshot runs",
+    )
+    max_runs_per_thread: int = Field(
+        default=10,
+        description="Keep at most N debug run folders per thread (oldest pruned)",
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:
