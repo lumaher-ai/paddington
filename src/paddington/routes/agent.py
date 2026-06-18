@@ -1,3 +1,4 @@
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends
@@ -10,6 +11,8 @@ from paddington.agent.agent_loop import (
 )
 from paddington.agent.tools import build_paddington_tools
 from paddington.browser.browser_session import BrowserSessionManager
+from paddington.browser.debug_recorder import DebugRecorder
+from paddington.config import get_settings
 from paddington.dependencies import (
     get_browser_session_manager,
     get_checkpointer,
@@ -41,7 +44,20 @@ async def run_agent(
     client_thread_id = data.thread_id or str(uuid4())
     scoped_thread_id = f"{current_user.id}:{client_thread_id}"
 
+    settings = get_settings()
     browser_session = await browser_session_manager.get_or_create(scoped_thread_id)
+
+    # Swap in this run's debug screenshot trail. No lock: a conversation is
+    # sequential, so runs on this per-thread session don't overlap.
+    browser_session.recorder = (
+        DebugRecorder(
+            scoped_thread_id,
+            Path(settings.debug_dir),
+            settings.max_runs_per_thread,
+        )
+        if settings.debug_screenshots
+        else None
+    )
 
     tools = build_paddington_tools(
         document_repository=doc_repo,

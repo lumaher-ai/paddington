@@ -18,6 +18,7 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
+from paddington.browser.debug_recorder import DebugRecorder
 from paddington.logging_config import get_logger
 from paddington.schemas.browser import (
     ClickResult,
@@ -86,6 +87,25 @@ class BrowserSession:
         self.context = context
         self.page = page
         self._ref_map: dict[str, str] = {}
+        # Debug-only per-run screenshot trail; swapped in at the start of each
+        # /agent/run. None disables capture entirely (the default / prod path).
+        # No lock needed: a conversation is sequential, so runs on one session
+        # don't overlap.
+        self.recorder: DebugRecorder | None = None
+
+    async def _capture_debug(self, tool_name: str) -> None:
+        """Save a viewport screenshot to the debug trail; never break the run.
+
+        Calls page.screenshot directly (not self.screenshot) to avoid the
+        per-call info log and any chance of recursion.
+        """
+        if self.recorder is None:
+            return
+        try:
+            png = await self.page.screenshot(full_page=False, type="png")
+            self.recorder.write(tool_name, png)
+        except Exception as e:
+            logger.warning("debug_capture_failed", tool=tool_name, error=str(e))
 
     async def navigate(
         self,
@@ -123,6 +143,7 @@ class BrowserSession:
 
         ok = error is None and status < 400 and not self.page.is_closed()
 
+        await self._capture_debug("navigate")
         return NavigateResult(
             final_url=final_url,
             title=title,
@@ -204,6 +225,7 @@ class BrowserSession:
         print(markdown)
         print("=== end get_snapshot markdown ===")
 
+        await self._capture_debug("get_snapshot")
         return PageSnapshot(
             url=self.page.url,
             title=title,
@@ -268,6 +290,7 @@ class BrowserSession:
 
         success = error is None and not self.page.is_closed()
 
+        await self._capture_debug("click")
         return ClickResult(
             success=success,
             previous_url=previous_url,
@@ -324,6 +347,7 @@ class BrowserSession:
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         success = error is None and not self.page.is_closed()
 
+        await self._capture_debug("input_text")
         return InputResult(
             success=success,
             ref=ref,
