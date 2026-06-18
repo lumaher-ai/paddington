@@ -213,6 +213,27 @@ class BrowserSession:
             total_chars=total_chars,
         )
 
+    async def screenshot(self, *, full_page: bool = False) -> bytes:
+        """Capture the current page as PNG bytes.
+
+        Mirrors get_snapshot's settle-before-read: let any in-flight navigation
+        reach a stable state so we don't screenshot a blank/transitional frame.
+        Raises PlaywrightError if the page is closed or the capture fails; the
+        caller (the tool) turns that into a text-only result.
+        """
+        with contextlib.suppress(PlaywrightError):
+            await self.page.wait_for_load_state("domcontentloaded", timeout=5_000)
+
+        png = await self.page.screenshot(full_page=full_page, type="png")
+
+        logger.info(
+            "browser_screenshot_captured",
+            url=self.page.url,
+            full_page=full_page,
+            size_bytes=len(png),
+        )
+        return png
+
     async def click(self, ref: str, timeout_ms: int = 30_000) -> ClickResult:
         start = time.perf_counter()
         previous_url = self.page.url

@@ -1,4 +1,10 @@
-from langchain_core.tools import BaseTool, tool
+import base64
+from typing import Annotated
+
+from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.tools import BaseTool, InjectedToolCallId, tool
+from langgraph.types import Command
+from playwright.async_api import Error as PlaywrightError
 
 from paddington.browser.browser_session import BrowserSession
 from paddington.schemas.browser import (
@@ -86,4 +92,56 @@ def build_browser_tools(session: BrowserSession) -> list[BaseTool]:
             timeout_ms=timeout_ms,
         )
 
-    return [navigate_to, get_snapshot, click, input_text]
+    @tool
+    async def take_screenshot(
+        tool_call_id: Annotated[str, InjectedToolCallId],
+        full_page: bool = False,
+    ) -> Command:
+        """Capture the current page as a PNG image you can actually see.
+
+        Use this to visually verify a page — layout, rendered charts/canvas, or
+        anything get_snapshot's text misses. Prefer get_snapshot for reading
+        text and for the refs needed to click/type; use this when you need to
+        *see* the page. Screenshots are token-expensive, so don't call it on
+        every step.
+
+        Args:
+            full_page: If False (default), capture only the visible viewport. If
+                True, capture the entire scrollable page (much larger / costlier).
+        """
+        try:
+            png = await session.screenshot(full_page=full_page)
+        except PlaywrightError as e:
+            return Command(
+                update={
+                    "messages": [
+                        ToolMessage(
+                            content=f"Screenshot failed: {e}",
+                            tool_call_id=tool_call_id,
+                        )
+                    ]
+                }
+            )
+
+        b64 = base64.b64encode(png).decode()
+        scope = "full page" if full_page else "viewport"
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=f"Screenshot captured ({scope}); attached as an image.",
+                        tool_call_id=tool_call_id,
+                    ),
+                    HumanMessage(
+                        content=[
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{b64}"},
+                            }
+                        ]
+                    ),
+                ]
+            }
+        )
+
+    return [navigate_to, get_snapshot, click, input_text, take_screenshot]

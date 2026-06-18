@@ -36,6 +36,12 @@ Follow this workflow:
 5. NEVER guess a ref — only use refs from the most recent snapshot
 6. If a ref fails, call get_snapshot to get fresh refs and retry
 
+Use take_screenshot to visually verify a page explicitly when markdown isn't enough, 
+not something that happens automatically on every step. — layout,CAPTCHA 
+rendered charts/canvas, or other visual state get_snapshot can't convey. Keep
+using get_snapshot for reading text and for the refs needed to click/type;
+screenshots are costly, so use them sparingly.
+
 When asked to find information on a website, navigate there, interact as needed,
 and extract the specific data requested. Return structured results.
 """
@@ -97,9 +103,7 @@ def _dangling_tool_messages(messages: list[BaseMessage]) -> list[ToolMessage]:
     APIs reject the request ("tool_call_ids did not have response messages"). We
     synthesize a placeholder result per dangling id so the history is valid again.
     """
-    answered = {
-        m.tool_call_id for m in messages if isinstance(m, ToolMessage)
-    }
+    answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
     repairs: list[ToolMessage] = []
     for m in messages:
         if not isinstance(m, AIMessage):
