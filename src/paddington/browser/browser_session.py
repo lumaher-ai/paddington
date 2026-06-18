@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import re
 import time
@@ -371,6 +372,9 @@ class BrowserSessionManager:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._sessions: dict[str, BrowserSession] = {}
+        # Guards the check-and-create in get_or_create so two concurrent
+        # requests can't both build a session (and leak a browser context).
+        self._lock = asyncio.Lock()
 
     async def __aenter__(self) -> "BrowserSessionManager":
         self._playwright = await async_playwright().start()
@@ -389,15 +393,24 @@ class BrowserSessionManager:
             await self._playwright.stop()
 
     async def get_or_create(self, thread_id: str) -> BrowserSession:
+        # Fast path: an existing session needs no lock (dict reads are safe
+        # between await points in a single event loop).
         session = self._sessions.get(thread_id)
-        if session is None:
-            if self._browser is None:
-                raise RuntimeError(
-                    "BrowserSessionManager used outside its async context; "
-                    "enter it with `async with` (or AsyncExitStack) first."
-                )
-            context = await self._browser.new_context()
-            page = await context.new_page()
-            session = BrowserSession(context, page)
-            self._sessions[thread_id] = session
+        if session is not None:
+            return session
+
+        # Slow path: serialize creation. Re-check inside the lock because another
+        # coroutine may have created the session while we waited for it.
+        async with self._lock:
+            session = self._sessions.get(thread_id)
+            if session is None:
+                if self._browser is None:
+                    raise RuntimeError(
+                        "BrowserSessionManager used outside its async context; "
+                        "enter it with `async with` (or AsyncExitStack) first."
+                    )
+                context = await self._browser.new_context()
+                page = await context.new_page()
+                session = BrowserSession(context, page)
+                self._sessions[thread_id] = session
         return session
