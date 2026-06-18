@@ -39,7 +39,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         manager = await stack.enter_async_context(BrowserSessionManager())
         app.state.browser_session_manager = manager
 
-        logger.info("application_started")
+        logger.info(
+            "application_started",
+            debug_screenshots=settings.debug_screenshots,
+            debug_dir=settings.debug_dir,
+        )
         yield
 
     await close_db()

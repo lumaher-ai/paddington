@@ -58,6 +58,13 @@ async def run_agent(
         if settings.debug_screenshots
         else None
     )
+    logger.debug(
+        "debug_recorder",
+        enabled=browser_session.recorder is not None,
+        run_dir=(
+            str(browser_session.recorder.run_dir) if browser_session.recorder else None
+        ),
+    )
 
     tools = build_paddington_tools(
         document_repository=doc_repo,
