@@ -3,7 +3,12 @@ from typing import Any
 
 import litellm
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware, AgentState
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    AgentState,
+    ModelRequest,
+    dynamic_prompt,
+)
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
@@ -13,34 +18,21 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
 
+from paddington.agent.phase_prompts import BROWSER_BASE_PROMPT
 from paddington.config import get_settings
 from paddington.exceptions import PaddingtonError
 from paddington.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-_DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant with access to tools.
+# Default prompt used when no per-phase prompt is supplied. Built from the shared
+# browser rules plus a generic preamble; phase nodes override this per invocation.
+_DEFAULT_SYSTEM_PROMPT = f"""You are a helpful assistant with access to tools.
 Use them when needed to answer the user's question accurately.
 If you can answer without tools, do so directly.
 Be concise and cite your sources when using search results.
 
-## Browser tools
-
-You can navigate and interact with real websites.
-Follow this workflow:
-
-1. Call navigate_to to go to a URL
-2. Call get_snapshot to see the page content and available interactive elements
-3. Each element has a ref (like "el_9") — use these refs in click_element and input_text
-4. After EVERY action (click, input), call get_snapshot again — the page has changed
-5. NEVER guess a ref — only use refs from the most recent snapshot
-6. If a ref fails, call get_snapshot to get fresh refs and retry
-
-Use take_screenshot to visually verify a page explicitly when markdown isn't enough, 
-not something that happens automatically on every step. — layout,CAPTCHA 
-rendered charts/canvas, or other visual state get_snapshot can't convey. Keep
-using get_snapshot for reading text and for the refs needed to click/type;
-screenshots are costly, so use them sparingly.
+{BROWSER_BASE_PROMPT}
 
 When asked to find information on a website, navigate there, interact as needed,
 and extract the specific data requested. Return structured results.
@@ -83,9 +75,28 @@ class AgentInvocationContext:
 
     Tells the budget middleware how many messages already existed at the
     start of this turn, so it can compute cost/tokens only from new messages.
+
+    ``system_prompt`` carries the per-phase prompt for this invocation; when None
+    the agent falls back to the default. Because the graph is compiled once, this
+    is how each phase node supplies its own goal/"ends when" prompt without a
+    rebuild — see ``_phase_system_prompt``.
     """
 
     baseline_message_count: int
+    system_prompt: str | None = None
+
+
+def _resolve_system_prompt(context: "AgentInvocationContext | None") -> str:
+    """Return the per-phase prompt when the invocation supplied one, else the default."""
+    if context is not None and context.system_prompt:
+        return context.system_prompt
+    return _DEFAULT_SYSTEM_PROMPT
+
+
+@dynamic_prompt
+def _phase_system_prompt(request: ModelRequest) -> str:
+    """Resolve the system prompt for this model call from the invocation context."""
+    return _resolve_system_prompt(request.runtime.context)
 
 
 _INTERRUPTED_TOOL_RESULT = (
@@ -143,16 +154,26 @@ class AgentLoop:
             max_retries=3,
             model_kwargs={"fallbacks": [settings.fallback_model]},
         )
+        # The system prompt is supplied per invocation via the dynamic-prompt
+        # middleware (reading AgentInvocationContext), not baked in here — that is
+        # how each phase node gets its own goal/"ends when" prompt on one graph.
         return create_agent(
             model,
             tools=tools,
-            system_prompt=self._config.system_prompt,
-            middleware=[BudgetMiddleware(self._config.max_cost_usd, self._config.model)],
+            middleware=[
+                _phase_system_prompt,
+                BudgetMiddleware(self._config.max_cost_usd, self._config.model),
+            ],
             context_schema=AgentInvocationContext,
             checkpointer=self._checkpointer,
         )
 
-    async def run(self, user_message: str, thread_id: str) -> AgentResult:
+    async def run(
+        self,
+        user_message: str,
+        thread_id: str,
+        system_prompt: str | None = None,
+    ) -> AgentResult:
         invoke_config: RunnableConfig = {
             "configurable": {"thread_id": thread_id},
             "recursion_limit": self._config.max_iterations * 2,
@@ -184,7 +205,10 @@ class AgentLoop:
             final = await self._graph.ainvoke(
                 {"messages": [*dangling, HumanMessage(content=user_message)]},
                 config=invoke_config,
-                context=AgentInvocationContext(baseline_message_count=baseline),
+                context=AgentInvocationContext(
+                    baseline_message_count=baseline,
+                    system_prompt=system_prompt or self._config.system_prompt,
+                ),
             )
         except GraphRecursionError as exc:
             logger.warning(
