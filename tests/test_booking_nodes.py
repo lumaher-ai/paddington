@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage
 from paddington.agent.agent_loop import AgentResult
 from paddington.agent.booking_nodes import (
     ROUTE_INFORM_MOVIE_UNAVAILABLE,
+    ROUTE_INFORM_NEEDS_RETRY,
     ROUTE_INFORM_THEATER_UNAVAILABLE,
     ROUTE_PRESENT_SHOWTIMES,
     build_phase_1_node,
@@ -94,9 +95,9 @@ async def test_node_falls_back_to_needs_retry_when_status_missing() -> None:
         ("FOUND_SHOWTIMES", ROUTE_PRESENT_SHOWTIMES),
         ("MOVIE_NOT_FOUND", ROUTE_INFORM_MOVIE_UNAVAILABLE),
         ("THEATER_UNAVAILABLE", ROUTE_INFORM_THEATER_UNAVAILABLE),
-        ("NEEDS_RETRY", ROUTE_INFORM_MOVIE_UNAVAILABLE),
-        (None, ROUTE_INFORM_MOVIE_UNAVAILABLE),
-        ("SOMETHING_UNEXPECTED", ROUTE_INFORM_MOVIE_UNAVAILABLE),
+        ("NEEDS_RETRY", ROUTE_INFORM_NEEDS_RETRY),
+        (None, ROUTE_INFORM_NEEDS_RETRY),
+        ("SOMETHING_UNEXPECTED", ROUTE_INFORM_NEEDS_RETRY),
     ],
 )
 def test_route_after_phase_1(outcome: str | None, expected_route: str) -> None:
