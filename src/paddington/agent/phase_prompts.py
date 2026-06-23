@@ -91,16 +91,17 @@ PHASE1_STATUSES = {
 }
 
 _PHASE1_GOAL = """\
-Navigate to cinecolombia.com and find showtimes for the movie "{movie}" at the
-"{theater}" theater on {date}. Dismiss any career or cookie popup, find the
-requested movie (scrolling as needed), open it, click "Ver horarios", select the
-requested date, and locate the requested theater to reveal its showtimes. If the
+Navigate to cinecolombia.com dismiss the career/cookie popup, 
+and find showtimes for the movie "{movie}" (scrolling as needed), open it, click "Ver horarios", 
+select the requested {date}, then locate the "{theater}" theater and reveal the showtimes. 
+If both theaters are available pick the first one; if only one is, pick that one. If the
 movie is not listed, or the theater is not available, say so plainly instead of
-guessing."""
+guessing.
+"""
 
 _PHASE1_ENDS_WHEN = (
     "the showtimes for the requested date and theater are visible on screen "
-    "(or you have determined the movie or theater is unavailable)."
+    "(or movie or theater not available in the list → inform user → **END**"
 )
 
 
