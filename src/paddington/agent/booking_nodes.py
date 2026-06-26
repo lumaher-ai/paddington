@@ -9,7 +9,7 @@ Only Phase 1 lives here today; the ``StateGraph`` that wires these nodes (plus i
 and phases 2-6) is a later slice. See docs/phase-based-booking-architecture.md.
 """
 
-from collections.abc import Awaitable, Callable
+from typing import Protocol
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
@@ -26,16 +26,24 @@ from paddington.agent.phase_prompts import (
     phase1_find_showtimes_prompt,
 )
 
-# A phase node: reads state + the run config, returns a partial-state update dict that
-# LangGraph merges back into BookingState.
-PhaseNode = Callable[[BookingState, RunnableConfig], Awaitable[dict]]
+
+class PhaseNode(Protocol):
+    """A phase node: reads state + the run config, returns a partial-state update dict.
+
+    Declared as a Protocol with *named* ``state``/``config`` params (not a bare
+    ``Callable``) so it matches LangGraph's ``StateNode`` (``_NodeWithConfig``), whose
+    ``__call__`` takes named params — a positional-only ``Callable`` alias fails that
+    structural check when passed to ``add_node``.
+    """
+
+    async def __call__(self, state: BookingState, config: RunnableConfig) -> dict: ...
 
 # Route names returned by route_after_phase_1. Defined as constants so the future
 # StateGraph wires add_node / add_conditional_edges against these exact strings.
 ROUTE_PRESENT_SHOWTIMES = "present_showtimes"
 ROUTE_INFORM_MOVIE_UNAVAILABLE = "inform_movie_unavailable"
 ROUTE_INFORM_THEATER_UNAVAILABLE = "inform_theater_unavailable"
-ROUTE_INFORM_NEEDS_RETRY = "something_went wrong_try_again"
+ROUTE_INFORM_NEEDS_RETRY = "inform_needs_retry"
 
 
 def build_phase_1_node(agent_loop: AgentLoop) -> PhaseNode:
@@ -95,3 +103,49 @@ def route_after_phase_1(state: BookingState) -> str:
         return ROUTE_INFORM_THEATER_UNAVAILABLE
     # NEEDS_RETRY or anything unexpected: terminate safely rather than loop.
     return ROUTE_INFORM_NEEDS_RETRY
+
+
+# --- Terminal inform nodes -------------------------------------------------------
+# The unhappy-path exits from the mermaid diagram. Each is a plain node: it reads
+# state and returns a single user-facing AIMessage, then the graph routes to END.
+# No browser, no LLM — they just tell the user what happened.
+
+
+async def inform_movie_unavailable(state: BookingState) -> dict:
+    """Phase 1 could not find the movie in the listing."""
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    f"Sorry — '{state['movie']}' isn't currently listed. "
+                    f"Try a different title or date."
+                )
+            )
+        ]
+    }
+
+
+async def inform_theater_unavailable(state: BookingState) -> dict:
+    """Phase 1 found the movie, but not at any preferred theater for the date."""
+    theaters = ", ".join(state["preferred_multiplexes"])
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    f"'{state['movie']}' isn't showing at {theaters} on {state['date']}. "
+                    f"Try another theater or date."
+                )
+            )
+        ]
+    }
+
+
+async def inform_needs_retry(state: BookingState) -> dict:
+    """Phase 1 ended without a usable outcome (no/invalid STATUS)."""
+    return {
+        "messages": [
+            AIMessage(
+                content="Something went wrong finding showtimes. Please try again."
+            )
+        ]
+    }
