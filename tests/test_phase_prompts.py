@@ -31,11 +31,13 @@ def test_build_phase_prompt_composes_base_goal_and_ends_when() -> None:
 
 def test_phase1_prompt_interpolates_booking_params() -> None:
     prompt = phase1_find_showtimes_prompt(
-        movie="Dune 3", theater="Titan Plaza", date="Saturday"
+        movie="Dune 3", theaters=["Titan Plaza"], date="Saturday"
     )
     assert BROWSER_BASE_PROMPT in prompt
     assert "Dune 3" in prompt
     assert "Titan Plaza" in prompt
+    # The theater name is resolved to its /cinemas/<slug>/ URL in the fallback chain.
+    assert "/cinemas/titan-plaza/" in prompt
     assert "Saturday" in prompt
     assert "Stop and report your findings as soon as" in prompt
     # Phase 1's allowed outcome tokens are surfaced in the STATUS instruction.
@@ -46,7 +48,7 @@ def test_phase1_prompt_interpolates_booking_params() -> None:
 
 def test_resolve_system_prompt_returns_per_phase_when_set() -> None:
     phase_prompt = phase1_find_showtimes_prompt(
-        movie="Dune 3", theater="Titan Plaza", date="Saturday"
+        movie="Dune 3", theaters=["Titan Plaza"], date="Saturday"
     )
     context = AgentInvocationContext(
         baseline_message_count=0, system_prompt=phase_prompt

@@ -60,12 +60,13 @@ def build_phase_1_node(agent_loop: AgentLoop) -> PhaseNode:
         date = state["date"]
         theaters = state["preferred_multiplexes"]
 
-        # 2. BUILD the phase prompt. The prompt template takes a single theater; we pass
-        #    the acceptable set joined so the LLM sees every option. Resolving *which* one
-        #    was available (selected_theater) is deferred to a later slice.
+        # 2. BUILD the phase prompt. The theaters are passed as an ordered list; the prompt
+        #    resolves each to its /cinemas/<slug>/ URL and renders a fallback chain (try the
+        #    first, fall through to the next). Resolving *which* one was available
+        #    (selected_theater) is deferred to a later slice.
         prompt = phase1_find_showtimes_prompt(
             movie=movie,
-            theater=", ".join(theaters),
+            theaters=theaters,
             date=date,
         )
 

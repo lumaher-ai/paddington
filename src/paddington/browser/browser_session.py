@@ -409,8 +409,57 @@ class BrowserSessionManager:
                         "BrowserSessionManager used outside its async context; "
                         "enter it with `async with` (or AsyncExitStack) first."
                     )
-                context = await self._browser.new_context()
+                # Stealth context: cinecolombia.com sits behind Cloudflare, which
+                # fingerprints Playwright's default Chromium. A real desktop Chrome
+                # user-agent + viewport + es-CO locale, plus hiding the
+                # navigator.webdriver automation flag before any page script runs,
+                # gets us past the bot check.
+                context = await self._browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 720},
+                    locale="es-CO",
+                )
                 page = await context.new_page()
+                await page.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => false})"
+                )
+                # Pre-seed CineColombia's cinema-group selection in localStorage so the
+                # site treats Bogotá / our two preferred theaters as already chosen and
+                # never raises the city/cinema popup. add_init_script runs before every
+                # navigation, so this lands before the site's JS reads the store. Trimmed
+                # to Andino + Avenida Chile and the fields the selection check needs.
+                await page.add_init_script(
+                    """
+    localStorage.setItem(
+        'VistaOmnichannelComponents::cinema-group-domain-store',
+        JSON.stringify({
+            "json": {
+                "selected": {
+                    "cinemas": [
+                        {
+                            "name": "Andino", "urlSegment": "andino",
+                            "url": "/cinemas/andino/", "nodeId": 2420, "alias": "cinema",
+                            "vistaCinema": {"key": "6493", "value": "ANDINO"}
+                        },
+                        {
+                            "name": "Avenida Chile", "urlSegment": "avenida-chile",
+                            "url": "/cinemas/avenida-chile/", "nodeId": 2553,
+                            "alias": "cinema",
+                            "vistaCinema": {"key": "6669", "value": "AVENIDA CHILE"}
+                        }
+                    ],
+                    "name": "Bogotá",
+                    "id": 2140
+                }
+            }
+        })
+    );
+"""
+                )
                 session = BrowserSession(context, page)
                 self._sessions[thread_id] = session
         return session

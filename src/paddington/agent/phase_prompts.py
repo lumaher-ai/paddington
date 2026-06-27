@@ -90,14 +90,43 @@ PHASE1_STATUSES = {
     PHASE1_THEATER_UNAVAILABLE,
 }
 
+# Theater-first navigation. cinecolombia.com lists each multiplex's movies on its own
+# /cinemas/<slug>/ page, which avoids the Cloudflare-blocked movie-detail page. We map
+# friendly theater names to those URLs; preferred_multiplexes stays as names so the
+# user-facing inform messages read naturally.
+CINECOLOMBIA_BASE_URL = "https://www.cinecolombia.com"
+MULTIPLEX_URLS = {
+    "Andino": "https://www.cinecolombia.com/cinemas/andino/",
+    "Avenida Chile": "https://www.cinecolombia.com/cinemas/avenida-chile/",
+}
+
+
+def _theater_url(name: str) -> str:
+    """Resolve a theater display name to its cinecolombia listings URL.
+
+    Known theaters use the explicit ``MULTIPLEX_URLS`` map; unknown names fall back to a
+    slug (lowercased, spaces -> hyphens) so the agent still has a URL to try.
+    """
+    if name in MULTIPLEX_URLS:
+        return MULTIPLEX_URLS[name]
+    slug = name.strip().lower().replace(" ", "-")
+    return f"{CINECOLOMBIA_BASE_URL}/cinemas/{slug}/"
+
+
 _PHASE1_GOAL = """\
-Navigate to cinecolombia.com dismiss the career/cookie popup, 
-and find showtimes for the movie "{movie}" (scrolling as needed), open it, click "Ver horarios", 
-select the requested {date}, then locate the "{theater}" theater and reveal the showtimes. 
-If both theaters are available pick the first one; if only one is, pick that one. If the
-movie is not listed, or the theater is not available, say so plainly instead of
-guessing.
-"""
+Find showtimes for "{movie}" on {date}.
+
+Try these theaters in priority order — navigate directly to each URL. Move to the
+next one only if the movie isn't listed at the current one:
+{theaters_block}
+
+For each theater:
+1. navigate_to its URL directly
+2. find "{movie}" in that theater's listings (scroll if needed)
+3. select the date {date} and reveal its showtimes
+
+Stop at the first theater that has the movie. If the movie is not listed at any of
+the theaters, say so plainly."""
 
 _PHASE1_ENDS_WHEN = (
     "the showtimes for the requested date and theater are visible on screen "
@@ -105,10 +134,17 @@ _PHASE1_ENDS_WHEN = (
 )
 
 
-def phase1_find_showtimes_prompt(movie: str, theater: str, date: str) -> str:
-    """System prompt for Phase 1 — find the movie and reveal its showtimes."""
+def phase1_find_showtimes_prompt(movie: str, theaters: list[str], date: str) -> str:
+    """System prompt for Phase 1 — find the movie and reveal its showtimes.
+
+    ``theaters`` are friendly names in priority order; each is resolved to its
+    cinecolombia listings URL and rendered as a numbered fallback chain in the goal.
+    """
+    theaters_block = "\n".join(
+        f"{i}. {name} — {_theater_url(name)}" for i, name in enumerate(theaters, 1)
+    )
     return build_phase_prompt(
-        goal=_PHASE1_GOAL.format(movie=movie, theater=theater, date=date),
+        goal=_PHASE1_GOAL.format(movie=movie, theaters_block=theaters_block, date=date),
         ends_when=_PHASE1_ENDS_WHEN,
         statuses=PHASE1_STATUSES,
     )

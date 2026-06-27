@@ -20,13 +20,13 @@ async def main():
         await checkpointer.setup()
 
         async with BrowserSessionManager() as manager:
-            session = await manager.get_or_create("test-booking-001")
+            session = await manager.get_or_create("test-booking-005")
 
             # Mirror routes/agent.py: the recorder is wired per-request there, not
             # in the browser layer, so attach it here or no screenshots are saved.
             if settings.debug_screenshots:
                 session.recorder = DebugRecorder(
-                    "test-booking-001",
+                    "test-booking-005",
                     Path(settings.debug_dir),
                     settings.max_runs_per_thread,
                 )
@@ -50,7 +50,7 @@ async def main():
                 preferred_multiplexes=["Andino", "Avenida Chile"],
             )
 
-            config: RunnableConfig = {"configurable": {"thread_id": "test-booking-001"}}
+            config: RunnableConfig = {"configurable": {"thread_id": "test-booking-005"}}
 
             print("Running Phase 1...")
             result = await graph.ainvoke(state, config)
