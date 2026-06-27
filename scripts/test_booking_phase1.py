@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 # Import your checkpointer — adjust to match your actual setup
 from langchain_core.runnables import RunnableConfig
@@ -7,6 +8,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from paddington.agent.agent_loop import AgentConfig, AgentLoop
 from paddington.agent.booking_graph import build_booking_graph, initial_booking_state
 from paddington.browser.browser_session import BrowserSessionManager
+from paddington.browser.debug_recorder import DebugRecorder
 from paddington.browser.tools import build_browser_tools
 from paddington.config import get_settings
 
@@ -19,6 +21,15 @@ async def main():
 
         async with BrowserSessionManager() as manager:
             session = await manager.get_or_create("test-booking-001")
+
+            # Mirror routes/agent.py: the recorder is wired per-request there, not
+            # in the browser layer, so attach it here or no screenshots are saved.
+            if settings.debug_screenshots:
+                session.recorder = DebugRecorder(
+                    "test-booking-001",
+                    Path(settings.debug_dir),
+                    settings.max_runs_per_thread,
+                )
 
             # Browser-only Phase 1 test: the DB/embedding/user tools aren't
             # exercised, so use the browser tools directly.
@@ -34,9 +45,9 @@ async def main():
 
             # Pick a movie currently showing on cinecolombia.com
             state = initial_booking_state(
-                movie="YOUR MOVIE HERE",
-                date="sábado",
-                preferred_multiplexes=["Titan Plaza", "Gran Estación"],
+                movie="Toy Story 5",
+                date="Hoy",
+                preferred_multiplexes=["Andino", "Avenida Chile"],
             )
 
             config: RunnableConfig = {"configurable": {"thread_id": "test-booking-001"}}

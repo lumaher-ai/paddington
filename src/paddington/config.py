@@ -64,7 +64,7 @@ class Settings(BaseSettings):
 
     # Debug observability
     debug_screenshots: bool = Field(
-        default=False,
+        default=True,
         description="Save per-step browser screenshots to disk for debugging",
     )
     debug_dir: str = Field(
