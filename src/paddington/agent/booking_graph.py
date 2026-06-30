@@ -21,6 +21,7 @@ from paddington.agent.booking_nodes import (
     ROUTE_INFORM_THEATER_UNAVAILABLE,
     ROUTE_PRESENT_SHOWTIMES,
     build_phase_1_node,
+    build_phase_2_node,
     inform_movie_unavailable,
     inform_needs_retry,
     inform_theater_unavailable,
@@ -31,18 +32,25 @@ from paddington.agent.booking_state import BookingState
 
 def build_booking_graph(
     agent_loop: AgentLoop,
-    checkpointer: BaseCheckpointSaver | None = None,
+    checkpointer: BaseCheckpointSaver,
 ) -> CompiledStateGraph:
     """Wire and compile the booking graph, injecting the request-scoped ``AgentLoop``.
 
     Mirrors the ``AgentLoop`` dependency pattern: the caller (a booking route) builds the
     ``AgentLoop`` once from per-request tools and hands it in, so the Phase 1 node can run
-    the inner agent. ``checkpointer`` is optional today — no interrupts yet — but is
-    threaded into ``compile`` so the Phase 2 interrupt slice needs no signature change.
+    the inner agent. ``checkpointer`` is required, not optional: Phase 2's ``interrupt()``
+    has nowhere to persist state without it and would raise at interrupt time, so a missing
+    checkpointer is always a bug — fail at construction rather than mid-booking. The caller
+    passes ``app.state.checkpointer`` (the same instance the inner ``AgentLoop`` uses; the
+    per-phase ``thread_id`` isolation — ``T:p1``, ``T:p3`` — keeps their data separate).
     """
     builder = StateGraph(BookingState)
 
     builder.add_node("phase_1", build_phase_1_node(agent_loop))
+    # Phase 2 presents Phase 1's showtimes and interrupts for the user's choice.
+    # Registered under ROUTE_PRESENT_SHOWTIMES so the conditional edge's path_map
+    # routes the FOUND_SHOWTIMES branch straight to it.
+    builder.add_node(ROUTE_PRESENT_SHOWTIMES, build_phase_2_node())
     # Inform nodes registered under their route-constant names so the conditional
     # edge's path_map maps each route string straight to its node.
     builder.add_node(ROUTE_INFORM_MOVIE_UNAVAILABLE, inform_movie_unavailable)
@@ -54,12 +62,15 @@ def build_booking_graph(
         "phase_1",
         route_after_phase_1,
         {
-            ROUTE_PRESENT_SHOWTIMES: END,  # placeholder for the Phase 2 interrupt
+            ROUTE_PRESENT_SHOWTIMES: ROUTE_PRESENT_SHOWTIMES,
             ROUTE_INFORM_MOVIE_UNAVAILABLE: ROUTE_INFORM_MOVIE_UNAVAILABLE,
             ROUTE_INFORM_THEATER_UNAVAILABLE: ROUTE_INFORM_THEATER_UNAVAILABLE,
             ROUTE_INFORM_NEEDS_RETRY: ROUTE_INFORM_NEEDS_RETRY,
         },
     )
+    # After Phase 2 resumes with the user's choice, the next slice is Phase 3
+    # (get-to-seats). Stops at END as a placeholder until that node exists.
+    builder.add_edge(ROUTE_PRESENT_SHOWTIMES, END)
     builder.add_edge(ROUTE_INFORM_MOVIE_UNAVAILABLE, END)
     builder.add_edge(ROUTE_INFORM_THEATER_UNAVAILABLE, END)
     builder.add_edge(ROUTE_INFORM_NEEDS_RETRY, END)
