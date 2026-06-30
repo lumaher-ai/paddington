@@ -90,6 +90,13 @@ PHASE1_STATUSES = {
     PHASE1_THEATER_UNAVAILABLE,
 }
 
+# Phase 2 outcome tokens. Unlike PHASE1_* these are NOT LLM-declared STATUS lines —
+# Phase 2 has no inner agent. They are produced by the node from the user's (validated)
+# resume value at the interrupt boundary, and route_after_phase_2 maps them to edges:
+# CHOSEN -> Phase 3 (get-to-seats), NO_SHOWTIME -> inform_no_showtime -> END.
+PHASE2_SHOWTIME_CHOSEN = "SHOWTIME_CHOSEN"
+PHASE2_NO_SHOWTIME = "NO_SHOWTIME"
+
 # Theater-first navigation. cinecolombia.com lists each multiplex's movies on its own
 # /cinemas/<slug>/ page, which avoids the Cloudflare-blocked movie-detail page. We map
 # friendly theater names to those URLs; preferred_multiplexes stays as names so the

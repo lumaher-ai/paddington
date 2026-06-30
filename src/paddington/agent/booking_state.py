@@ -40,6 +40,12 @@ class BookingState(TypedDict):
 
     # Resolved as phases complete.
     selected_theater: str | None
+    # Showtime options Phase 1 extracted and persisted, e.g.
+    # ``[{"id": "st_1", "label": "7:20 P.M. · SALA 4", "time": ..., "hall": ...}, ...]``.
+    # Persisting them here makes the Phase 2 interrupt node a pure read on resume — it
+    # re-runs from the top, but only reads these ids instead of re-deriving them with an
+    # LLM (which would drift), and validates the resume choice against them.
+    offered_showtimes: list[dict] | None
     chosen_showtime: str | None
     seat_section: str | None
     chosen_seats: list[str] | None
