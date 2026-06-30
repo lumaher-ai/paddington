@@ -20,6 +20,7 @@ dependencies = [
     "langgraph-checkpoint-postgres>=3.0.5",
     "litellm>=1.83.0",
     "markdownify>=1.2.2",
+    "mypy>=2.1.0",
     "openai>=2.32.0",
     "passlib[argon2]>=1.7.4",
     "pgvector>=0.4.2",

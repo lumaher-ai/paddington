@@ -12,6 +12,15 @@ from paddington.agent.booking_nodes import (
     build_phase_1_node,
     route_after_phase_1,
 )
+from paddington.agent.showtime_extraction import ExtractedShowtime, ShowtimeList
+
+
+async def _fake_extractor(answer: str) -> ShowtimeList:
+    """Deterministic Option-B double so the node never makes a live LLM call."""
+    return ShowtimeList(
+        selected_theater="Andino",
+        showtimes=[ExtractedShowtime(time="7:20 P.M.", hall="SALA 4")],
+    )
 
 
 @dataclass
@@ -52,7 +61,7 @@ def _config(thread_id: str = "user-1:thread-9") -> dict:
 
 async def test_node_parses_found_showtimes_and_returns_summary_message() -> None:
     fake = _FakeAgentLoop("Here are the showtimes.\nSTATUS: FOUND_SHOWTIMES")
-    node = build_phase_1_node(fake)
+    node = build_phase_1_node(fake, extract_showtimes=_fake_extractor)
 
     update = await node(_state(), _config())
 
@@ -61,11 +70,14 @@ async def test_node_parses_found_showtimes_and_returns_summary_message() -> None
     msg = update["messages"][0]
     assert isinstance(msg, AIMessage)
     assert msg.content == "Here are the showtimes.\nSTATUS: FOUND_SHOWTIMES"
+    # On the happy path the node structures + persists the options for Phase 2.
+    assert update["selected_theater"] == "Andino"
+    assert [o["id"] for o in update["offered_showtimes"]] == ["st_1"]
 
 
 async def test_node_runs_inner_agent_on_isolated_thread_with_phase_prompt() -> None:
     fake = _FakeAgentLoop("STATUS: FOUND_SHOWTIMES")
-    node = build_phase_1_node(fake)
+    node = build_phase_1_node(fake, extract_showtimes=_fake_extractor)
 
     await node(_state(), _config("user-1:thread-9"))
 

@@ -146,6 +146,11 @@ class AgentLoop:
         self._checkpointer = checkpointer
         self._graph = self._build_graph(tools)
 
+    @property
+    def model(self) -> str:
+        """The LLM model id this loop runs on (used to build sibling LLM calls)."""
+        return self._config.model
+
     def _build_graph(self, tools: list[BaseTool]) -> CompiledStateGraph[Any, Any, Any, Any]:
         settings = get_settings()
         model = ChatLiteLLM(
