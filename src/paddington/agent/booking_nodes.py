@@ -13,6 +13,7 @@ from typing import Protocol
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import interrupt
 
 from paddington.agent.agent_loop import AgentLoop
 from paddington.agent.booking_state import BookingState
@@ -37,6 +38,7 @@ class PhaseNode(Protocol):
     """
 
     async def __call__(self, state: BookingState, config: RunnableConfig) -> dict: ...
+
 
 # Route names returned by route_after_phase_1. Defined as constants so the future
 # StateGraph wires add_node / add_conditional_edges against these exact strings.
@@ -144,9 +146,28 @@ async def inform_theater_unavailable(state: BookingState) -> dict:
 async def inform_needs_retry(state: BookingState) -> dict:
     """Phase 1 ended without a usable outcome (no/invalid STATUS)."""
     return {
-        "messages": [
-            AIMessage(
-                content="Something went wrong finding showtimes. Please try again."
-            )
-        ]
+        "messages": [AIMessage(content="Something went wrong finding showtimes. Please try again.")]
     }
+
+
+def build_phase_2_node() -> PhaseNode:
+
+    async def phase_2_present_showtimes(state: BookingState, config: RunnableConfig) -> dict:
+        # The showtimes are in Phase 1's answer (last AIMessage in messages)
+        last_answer = state["messages"][-1].content
+
+        # Pause the graph and present options to the user
+        user_choice = interrupt(
+            {
+                "question": "Which showtime would you like?",
+                "showtimes": last_answer,
+            }
+        )
+
+        # Graph resumes here when the user responds
+        return {
+            "chosen_showtime": user_choice,
+            "phase": "get_to_seats",
+        }
+
+    return phase_2_present_showtimes
