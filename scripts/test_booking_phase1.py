@@ -41,7 +41,9 @@ async def main():
                 checkpointer=checkpointer,
             )
 
-            graph = build_booking_graph(agent_loop=agent_loop, checkpointer=checkpointer)
+            graph = build_booking_graph(
+                agent_loop=agent_loop, session=session, checkpointer=checkpointer
+            )
 
             # Pick a movie currently showing on cinecolombia.com
             state = initial_booking_state(

@@ -75,7 +75,8 @@ _COLLECT_INTERACTIVE_JS = """
       || el.getAttribute('title')
       || ''
     ).trim().replace(/\\s+/g, ' ').slice(0, 200);
-    return { ref, role, name };
+    const href = el.tagName === 'A' ? el.href : null;
+    return { ref, role, name, href };
   });
 }
 """
@@ -88,6 +89,10 @@ class BrowserSession:
         self.context = context
         self.page = page
         self._ref_map: dict[str, str] = {}
+        # The most recent snapshot this session read, retained so a phase node can
+        # deterministically pull data the LLM saw but must not transcribe — e.g. the
+        # href of a showtime link matched to a chosen screening. Set by get_snapshot.
+        self.last_snapshot: PageSnapshot | None = None
         # Debug-only per-run screenshot trail; swapped in at the start of each
         # /agent/run. None disables capture entirely (the default / prod path).
         # No lock needed: a conversation is sequential, so runs on one session
@@ -185,7 +190,7 @@ class BrowserSession:
         except PlaywrightError as e:
             url = self.page.url
             logger.warning("browser_snapshot_failed", url=url, error=str(e))
-            return PageSnapshot(
+            self.last_snapshot = PageSnapshot(
                 url=url,
                 title="",
                 markdown="",
@@ -194,6 +199,7 @@ class BrowserSession:
                 total_chars=0,
                 error=str(e),
             )
+            return self.last_snapshot
 
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup(list(_NOISE_TAGS)):
@@ -220,14 +226,8 @@ class BrowserSession:
             returned_chars=len(markdown),
         )
 
-        # TEMP: print the markdown returned to the agent for debugging
-
-        print("=== get_snapshot markdown ===")
-        print(markdown)
-        print("=== end get_snapshot markdown ===")
-
         await self._capture_debug("get_snapshot")
-        return PageSnapshot(
+        self.last_snapshot = PageSnapshot(
             url=self.page.url,
             title=title,
             markdown=markdown,
@@ -235,6 +235,7 @@ class BrowserSession:
             truncated=truncated,
             total_chars=total_chars,
         )
+        return self.last_snapshot
 
     async def screenshot(self, *, full_page: bool = False) -> bytes:
         """Capture the current page as PNG bytes.

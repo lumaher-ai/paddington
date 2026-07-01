@@ -47,6 +47,10 @@ class BookingState(TypedDict):
     # LLM (which would drift), and validates the resume choice against them.
     offered_showtimes: list[dict] | None
     chosen_showtime: str | None
+    # Code-owned seat-selection URL of the chosen showtime (from the option's ``url``),
+    # so Phase 3 can navigate straight to the seat map. ``None`` when Phase 1 found no
+    # matching link — Phase 3 then re-grounds by ``chosen_showtime`` label instead.
+    chosen_showtime_url: str | None
     seat_section: str | None
     chosen_seats: list[str] | None
     payment_link: str | None

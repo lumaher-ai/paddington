@@ -34,6 +34,11 @@ class InteractiveElement(BaseModel):
         description="ARIA role of the element, e.g. 'link', 'button', 'textbox'.",
     )
     name: str = Field(description="Accessible name shown to the user.")
+    href: str | None = Field(
+        default=None,
+        description="Absolute URL for link elements; None for non-links. Read by code "
+        "(e.g. to capture a showtime's seat-selection URL), not for the LLM to transcribe.",
+    )
 
 
 class PageSnapshot(BaseModel):

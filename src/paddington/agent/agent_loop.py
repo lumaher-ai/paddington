@@ -9,7 +9,13 @@ from langchain.agents.middleware import (
     ModelRequest,
     dynamic_prompt,
 )
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_litellm import ChatLiteLLM
@@ -168,6 +174,9 @@ class AgentLoop:
             middleware=[
                 _phase_system_prompt,
                 BudgetMiddleware(self._config.max_cost_usd, self._config.model),
+                # Trim stale page snapshots/screenshots from each request (nearest the
+                # model call) so a phase's context stays bounded across ReAct turns.
+                SnapshotPruneMiddleware(),
             ],
             context_schema=AgentInvocationContext,
             checkpointer=self._checkpointer,
@@ -331,3 +340,95 @@ class BudgetMiddleware(AgentMiddleware):
             )
             return {"messages": [stripped]}
         return None
+
+
+# --- Snapshot pruning ------------------------------------------------------------
+# Inside one phase run, the ReAct loop calls get_snapshot / take_screenshot on nearly
+# every turn, so the message history fills with stale ~8k-char page dumps and base64
+# screenshots. Only the most recent of each reflects the live page (refs are valid only
+# "until the next snapshot"), so the rest are pure token waste — and their refs are
+# actively misleading. We collapse the stale ones in the *outgoing request only*.
+
+_SNAPSHOT_TOOL_NAME = "get_snapshot"
+_SNAPSHOT_PLACEHOLDER = (
+    "[stale page snapshot pruned to save context — call get_snapshot to re-read this "
+    "page; earlier refs are no longer valid]"
+)
+_SCREENSHOT_PLACEHOLDER = "[earlier screenshot omitted to save context]"
+
+
+def _is_screenshot_message(message: BaseMessage) -> bool:
+    """True for a HumanMessage carrying an image block (a take_screenshot result).
+
+    take_screenshot appends the PNG as a HumanMessage whose content is a list with an
+    ``image_url`` block (browser/tools.py); that image is the token-heavy part.
+    """
+    if not isinstance(message, HumanMessage) or not isinstance(message.content, list):
+        return False
+    return any(
+        isinstance(part, dict) and part.get("type") in {"image_url", "image"}
+        for part in message.content
+    )
+
+
+def _prune_snapshots(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Collapse every get_snapshot ToolMessage and screenshot image except the most
+    recent of each to a short placeholder, returning a NEW list.
+
+    Non-destructive: originals are never mutated (they may be shared with the persisted
+    checkpoint) — collapsed messages are fresh ``model_copy`` copies. A stale snapshot
+    ToolMessage's *content* is replaced, never the message removed: every tool_call needs
+    a matching ToolMessage or the LLM API rejects the history (see
+    ``_dangling_tool_messages``). When there is nothing to prune the input list is
+    returned by identity so the caller can skip the ``override``.
+    """
+    # Map tool_call_id -> tool name so we can tell which ToolMessages are snapshots.
+    call_names: dict[str, str | None] = {}
+    for m in messages:
+        if isinstance(m, AIMessage):
+            for tc in m.tool_calls or []:
+                call_id = tc.get("id")
+                if call_id:
+                    call_names[call_id] = tc.get("name")
+
+    def _is_snapshot(m: BaseMessage) -> bool:
+        return isinstance(m, ToolMessage) and (
+            call_names.get(m.tool_call_id) == _SNAPSHOT_TOOL_NAME
+            or m.name == _SNAPSHOT_TOOL_NAME
+        )
+
+    snapshot_idxs = [i for i, m in enumerate(messages) if _is_snapshot(m)]
+    screenshot_idxs = [i for i, m in enumerate(messages) if _is_screenshot_message(m)]
+
+    # Keep the most recent of each type; collapse everything earlier.
+    stale_snapshots = set(snapshot_idxs[:-1])
+    stale_screenshots = set(screenshot_idxs[:-1])
+    if not stale_snapshots and not stale_screenshots:
+        return messages
+
+    pruned: list[AnyMessage] = []
+    for i, m in enumerate(messages):
+        if i in stale_snapshots:
+            pruned.append(m.model_copy(update={"content": _SNAPSHOT_PLACEHOLDER}))
+        elif i in stale_screenshots:
+            pruned.append(m.model_copy(update={"content": _SCREENSHOT_PLACEHOLDER}))
+        else:
+            pruned.append(m)
+    return pruned
+
+
+class SnapshotPruneMiddleware(AgentMiddleware):
+    """Keep only the most-recent snapshot and screenshot in the model request.
+
+    Snapshots/screenshots accumulate across a phase's ReAct turns, but only the latest
+    reflects the live page. We prune the outgoing ``ModelRequest`` only — the persisted
+    checkpoint keeps the full transcript, so this is reversible and doesn't perturb budget
+    accounting (which reads persisted ``usage_metadata``, not the request). Async because
+    the loop runs under ``ainvoke``.
+    """
+
+    async def awrap_model_call(self, request: ModelRequest, handler):
+        pruned = _prune_snapshots(request.messages)
+        if pruned is not request.messages:
+            request = request.override(messages=pruned)
+        return await handler(request)
