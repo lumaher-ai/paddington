@@ -18,7 +18,7 @@ read the live page" thesis. The ``id`` is a round-trip token *we* assign (``st_1
 a durable DOM id; Phase 3 re-grounds on the live page using the chosen option's label.
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import cast
 
 from langchain_litellm import ChatLiteLLM
@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from paddington.config import get_settings
 from paddington.logging_config import get_logger
+from paddington.schemas.browser import InteractiveElement
 
 logger = get_logger(__name__)
 
@@ -78,13 +79,47 @@ def _showtime_label(s: ExtractedShowtime) -> str:
     return " · ".join(p for p in parts if p)
 
 
-def offered_options(extraction: ShowtimeList) -> list[dict]:
-    """Assign round-trip ids and human labels to the extracted showtimes.
+def _match_url(s: ExtractedShowtime, links: Sequence[InteractiveElement]) -> str | None:
+    """Find the seat-selection URL for a screening among the snapshot's link elements.
+
+    Deterministic, code-owned: a URL must never be transcribed by the LLM (one dropped
+    character silently books the wrong screening — same reason ``id`` is our token, not
+    the model's). The structuring LLM only gives us the semantic fields (``time``,
+    ``hall``); here we match those against the ``name`` of each link the snapshot captured
+    and return that link's real ``href``. Time is the primary key; ``hall`` disambiguates
+    two screenings at the same time in different auditoriums. Whitespace is stripped from
+    both sides so "7:20 P.M." matches a "7:20P.M." link label. Returns None when no link
+    matches — the caller leaves ``url`` unset and Phase 3 falls back to the label.
+    """
+    t = s.time.replace(" ", "")
+    hall = s.hall.replace(" ", "")
+    if not t:
+        return None
+    for el in links:
+        if not el.href:
+            continue
+        name = el.name.replace(" ", "")
+        if t in name and (not hall or hall in name):
+            return el.href
+    return None
+
+
+def offered_options(
+    extraction: ShowtimeList,
+    links: Sequence[InteractiveElement] = (),
+) -> list[dict]:
+    """Assign round-trip ids, human labels, and code-derived URLs to the extracted showtimes.
 
     Returns the option dicts persisted into ``BookingState.offered_showtimes`` so the
     Phase 2 interrupt node is a pure read on resume (no LLM re-run, no id drift). Each
     dict keeps the id, the presentational ``label``, and the raw ``time``/``hall`` so a
     later phase can use them without re-parsing the label.
+
+    ``links`` are the interactive elements from Phase 1's last snapshot; each screening is
+    matched to its seat-selection ``href`` (see ``_match_url``) so Phase 3 can navigate
+    straight to the seat map instead of re-finding the showtime. ``url`` is None when no
+    link matched. Defaults to ``()`` so callers/tests that don't care about URLs are
+    unaffected.
     """
     return [
         {
@@ -94,6 +129,7 @@ def offered_options(extraction: ShowtimeList) -> list[dict]:
             "hall": s.hall,
             "format": s.format,
             "language": s.language,
+            "url": _match_url(s, links),
         }
         for i, s in enumerate(extraction.showtimes, 1)
     ]

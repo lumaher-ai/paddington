@@ -97,6 +97,15 @@ PHASE1_STATUSES = {
 PHASE2_SHOWTIME_CHOSEN = "SHOWTIME_CHOSEN"
 PHASE2_NO_SHOWTIME = "NO_SHOWTIME"
 
+# Phase 3 outcomes. The inner agent navigates to the seat map and declares one of these
+# as its STATUS line; NEEDS_RETRY is the fallback when no valid status is present.
+PHASE3_SEAT_MAP_VISIBLE = "SEAT_MAP_VISIBLE"
+PHASE3_NEEDS_RETRY = "NEEDS_RETRY"  # fallback / no valid status
+
+PHASE3_STATUSES = {
+    PHASE3_SEAT_MAP_VISIBLE,
+}
+
 # Theater-first navigation. cinecolombia.com lists each multiplex's movies on its own
 # /cinemas/<slug>/ page, which avoids the Cloudflare-blocked movie-detail page. We map
 # friendly theater names to those URLs; preferred_multiplexes stays as names so the
@@ -154,4 +163,69 @@ def phase1_find_showtimes_prompt(movie: str, theaters: list[str], date: str) -> 
         goal=_PHASE1_GOAL.format(movie=movie, theaters_block=theaters_block, date=date),
         ends_when=_PHASE1_ENDS_WHEN,
         statuses=PHASE1_STATUSES,
+    )
+
+
+# --- Phase 3: get to the seat map --------------------------------------------
+# Thin navigation slice. The chosen showtime's seat-selection URL (captured by code in
+# Phase 1) is the fast path; the human label is the fallback if that URL is missing. The
+# one non-obvious obstacle is the guest-checkout interstitial: an unauthenticated hit to a
+# /seats URL redirects to a sign-in page, and "Comprar sin registrarse" is the way through.
+
+_PHASE3_GOAL_WITH_URL = """\
+Get to the seat-selection map for the showtime the user chose: "{chosen_label}".
+
+1. navigate_to this URL directly — it goes straight to seat selection:
+   {seat_url}
+2. If that page redirects to a sign-in / "Iniciar sesión" screen, get_snapshot and click
+   the "Comprar sin registrarse" (buy without registering) button to continue as a guest.
+   Do NOT try to log in, create an account, enter any credentials, or solve a CAPTCHA.
+3. get_snapshot and confirm the interactive seat map has loaded.
+
+If navigating to the URL fails or does not reach a seat map, fall back to the theater
+route below."""
+
+_PHASE3_GOAL_LABEL_ONLY = """\
+Get to the seat-selection map for the showtime the user chose: "{chosen_label}".
+
+1. Go to the theater's listings and find the screening labeled "{chosen_label}"
+   (the theaters, in priority order):
+{theaters_block}
+2. Click that showtime to open seat selection.
+3. If the page redirects to a sign-in / "Iniciar sesión" screen, get_snapshot and click
+   the "Comprar sin registrarse" (buy without registering) button to continue as a guest.
+   Do NOT try to log in, create an account, enter any credentials, or solve a CAPTCHA.
+4. get_snapshot and confirm the interactive seat map has loaded."""
+
+_PHASE3_ENDS_WHEN = (
+    "the interactive seat map is visible (the page is titled 'Seleccione sus sillas' and "
+    "shows the seat legend and clickable seat buttons)"
+)
+
+
+def phase3_get_to_seats_prompt(
+    chosen_label: str,
+    seat_url: str | None,
+    theaters: list[str],
+) -> str:
+    """System prompt for Phase 3 — reach the seat map for the chosen showtime.
+
+    Prefers the code-captured ``seat_url`` (direct navigation); when it is ``None`` the
+    prompt falls back to re-finding the screening by ``chosen_label`` on the theater page.
+    Either way the agent must handle the guest-checkout ("Comprar sin registrarse")
+    interstitial and stop once the seat map is visible.
+    """
+    if seat_url:
+        goal = _PHASE3_GOAL_WITH_URL.format(chosen_label=chosen_label, seat_url=seat_url)
+    else:
+        theaters_block = "\n".join(
+            f"   {i}. {name} — {_theater_url(name)}" for i, name in enumerate(theaters, 1)
+        )
+        goal = _PHASE3_GOAL_LABEL_ONLY.format(
+            chosen_label=chosen_label, theaters_block=theaters_block
+        )
+    return build_phase_prompt(
+        goal=goal,
+        ends_when=_PHASE3_ENDS_WHEN,
+        statuses=PHASE3_STATUSES,
     )
