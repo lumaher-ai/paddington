@@ -10,23 +10,59 @@ from paddington.agent.agent_loop import AgentLoop, AgentResult
 from paddington.agent.booking_graph import build_booking_graph, initial_booking_state
 from paddington.agent.booking_state import BookingState
 from paddington.agent.showtime_extraction import ExtractedShowtime, ShowtimeList
+from paddington.browser.browser_session import BrowserSession
+from paddington.schemas.browser import InteractiveElement, PageSnapshot
+
+# A Phase 3 answer that reaches the seat map, so a selection flows all the way through.
+_SEAT_MAP_ANSWER = "The seat map is on screen.\nSTATUS: SEAT_MAP_VISIBLE"
 
 
 @dataclass
 class _FakeAgentLoop:
-    """Stand-in for AgentLoop: returns a canned answer so the graph can run end-to-end."""
+    """Stand-in for AgentLoop: returns a per-phase canned answer so the graph runs through.
+
+    Phase 1 and Phase 3 both run the inner agent; they are told apart by the isolated
+    thread-id suffix (``:p1`` / ``:p3``) so one fake can serve both with distinct STATUS
+    lines.
+    """
 
     answer: str
+    phase3_answer: str = _SEAT_MAP_ANSWER
 
     async def run(self, **kwargs) -> AgentResult:
+        thread_id = kwargs.get("thread_id", "")
+        answer = self.phase3_answer if thread_id.endswith(":p3") else self.answer
         return AgentResult(
-            answer=self.answer,
+            answer=answer,
             iterations=1,
             tools_used=[],
             total_input_tokens=0,
             total_output_tokens=0,
             total_cost_usd=0.0,
         )
+
+
+class _FakeSession:
+    """BrowserSession stand-in: the Phase 1 node only reads ``last_snapshot``."""
+
+    def __init__(self, last_snapshot: PageSnapshot | None = None) -> None:
+        self.last_snapshot = last_snapshot
+
+
+def _session(links: list[InteractiveElement] | None = None) -> BrowserSession:
+    snapshot = (
+        PageSnapshot(
+            url="https://www.cinecolombia.com/cinemas/andino/",
+            title="",
+            markdown="",
+            interactive_elements=links,
+            truncated=False,
+            total_chars=0,
+        )
+        if links is not None
+        else None
+    )
+    return cast(BrowserSession, _FakeSession(snapshot))
 
 
 # Deterministic Option-B extractor double: skips the live LLM and returns two showtimes
@@ -44,15 +80,17 @@ async def _fake_extractor(answer: str) -> ShowtimeList:
 _CONFIG: RunnableConfig = {"configurable": {"thread_id": "t1"}}
 
 
-def _graph(answer: str, extractor=_fake_extractor):
+def _graph(answer: str, extractor=_fake_extractor, session=None, loop=None):
     """Build the booking graph over a fake agent loop and an in-memory checkpointer.
 
     ``_FakeAgentLoop`` is a structural stand-in (it implements ``run``), so cast it to
     ``AgentLoop`` to satisfy the static signature without subclassing the real loop. The
-    Option-B extractor is injected so Phase 1 never makes a live LLM call in tests.
+    Option-B extractor is injected so Phase 1 never makes a live LLM call in tests. A fake
+    ``session`` (no snapshot by default → no captured URLs) supplies Phase 1's link source.
     """
     return build_booking_graph(
-        cast(AgentLoop, _FakeAgentLoop(answer)),
+        cast(AgentLoop, loop or _FakeAgentLoop(answer)),
+        session=session if session is not None else _session(),
         checkpointer=MemorySaver(),
         extract_showtimes=extractor,
     )
@@ -101,7 +139,7 @@ async def test_found_showtimes_interrupts_with_structured_options() -> None:
     assert "STATUS" not in str(payload)
 
 
-async def test_selecting_a_showtime_sets_chosen_and_routes_to_phase_3() -> None:
+async def test_selecting_a_showtime_runs_phase_3_to_the_seat_map() -> None:
     graph = _graph(_FOUND_ANSWER)
 
     await graph.ainvoke(_state(), config=_CONFIG)
@@ -110,11 +148,47 @@ async def test_selecting_a_showtime_sets_chosen_and_routes_to_phase_3() -> None:
     )
 
     assert "__interrupt__" not in final
-    assert final["phase_outcome"] == "SHOWTIME_CHOSEN"
-    # chosen_showtime is the human label (Phase 3 re-grounds on it), not the id.
+    # chosen_showtime is the human label (Phase 3's fallback), set by Phase 2.
     assert final["chosen_showtime"] == "9:50 P.M. · SALA 1"
-    # Routed to the Phase 3 placeholder (END) — no inform message was appended.
-    assert len(final["messages"]) == 1
+    # Phase 3 ran the inner agent, reached the seat map, and stopped at the Phase 4
+    # placeholder (END). Outcome is Phase 3's, and both phase summaries are present.
+    assert final["phase_outcome"] == "SEAT_MAP_VISIBLE"
+    assert len(final["messages"]) == 2
+
+
+async def test_chosen_showtime_url_is_captured_and_threaded_to_phase_3() -> None:
+    # The showtimes page Phase 1 last read carries the real seat-selection href.
+    seat_url = "https://multiplex.cinecolombia.com/order/showtimes/6493-6874/seats"
+    links = [
+        InteractiveElement(ref="el_1", role="link", name="9:50 P.M. SALA 1", href=seat_url),
+    ]
+    graph = _graph(_FOUND_ANSWER, session=_session(links))
+
+    interrupted = await graph.ainvoke(_state(), config=_CONFIG)
+    # Phase 1 stamped the code-owned URL onto the option (st_2 == 9:50 P.M. · SALA 1).
+    st2 = next(o for o in interrupted["offered_showtimes"] if o["id"] == "st_2")
+    assert st2["url"] == seat_url
+
+    final = await graph.ainvoke(
+        Command(resume={"action": "select", "showtime_id": "st_2"}), config=_CONFIG
+    )
+    # The chosen option's URL was threaded into state for Phase 3's fast path.
+    assert final["chosen_showtime_url"] == seat_url
+    assert final["phase_outcome"] == "SEAT_MAP_VISIBLE"
+
+
+async def test_phase_3_failure_routes_to_inform_needs_retry() -> None:
+    loop = _FakeAgentLoop(_FOUND_ANSWER, phase3_answer="Could not reach the seats.")
+    graph = _graph(_FOUND_ANSWER, loop=loop)
+
+    await graph.ainvoke(_state(), config=_CONFIG)
+    final = await graph.ainvoke(
+        Command(resume={"action": "select", "showtime_id": "st_1"}), config=_CONFIG
+    )
+
+    # Phase 3 emitted no valid STATUS → NEEDS_RETRY → inform exit with the retry message.
+    assert final["phase_outcome"] == "NEEDS_RETRY"
+    assert "Please try again" in _contents(final)
 
 
 async def test_rejecting_all_showtimes_routes_to_inform_no_showtime() -> None:
@@ -141,13 +215,13 @@ async def test_invalid_resume_id_reprompts_then_accepts_valid_choice() -> None:
     assert "__interrupt__" in reprompt
     assert reprompt["__interrupt__"][0].value["error"]
 
-    # A subsequent valid choice resolves the loop.
+    # A subsequent valid choice resolves the loop, and the graph runs on through Phase 3.
     final = await graph.ainvoke(
         Command(resume={"action": "select", "showtime_id": "st_1"}), config=_CONFIG
     )
     assert "__interrupt__" not in final
-    assert final["phase_outcome"] == "SHOWTIME_CHOSEN"
     assert final["chosen_showtime"] == "7:20 P.M. · SALA 4 · 2D · Subtitled"
+    assert final["phase_outcome"] == "SEAT_MAP_VISIBLE"
 
 
 async def test_extraction_failure_downgrades_to_needs_retry() -> None:
