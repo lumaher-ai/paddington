@@ -6,8 +6,9 @@ phases and whose edges encode the happy path plus the unhappy-path early exits. 
 phases' actual browser work is delegated to the inner ReAct agent via the phase nodes in
 ``booking_nodes``; this module only wires them together.
 
-Milestone 1 builds Phase 1 and its exits only. The ``FOUND_SHOWTIMES`` branch stops at
-``END`` as a placeholder for the Phase 2 interrupt (later slice).
+Phases 1-3 are wired: Phase 1 finds showtimes, Phase 2 interrupts for the user's choice,
+Phase 3 navigates to the seat map. Phase 3's ``SEAT_MAP_VISIBLE`` branch stops at ``END``
+as a placeholder for Phase 4 (seat selection, a later slice).
 """
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
