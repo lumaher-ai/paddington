@@ -139,14 +139,23 @@ def _theater_url(name: str) -> str:
 _PHASE1_GOAL = """\
 Find showtimes for "{movie}" on {date}.
 
-Try these theaters in priority order — navigate directly to each URL. Move to the
-next one only if the movie isn't listed at the current one:
+Navigate these theater in priority order - directly to each URL. Move to the
+next one only if the movie isn't listed at the first one:
 {theaters_block}
 
 For each theater:
 1. navigate_to its URL directly
-2. find "{movie}" in that theater's listings (scroll if needed)
-3. select the date {date} and reveal its showtimes
+2. find "{movie}" in that theater's listings
+3. Below the movie name is listed the showtimes (scroll down to find it)
+4. Select the date {date} and reveal its showtimes
+
+Do NOT use take_screenshot — the showtimes/seat data are text/DOM. Use get_snapshot
+only. Screenshots waste tokens and add nothing here.
+
+IMPORTANT: Do NOT click on movie titles or poster links. The showtimes are 
+listed directly on the theater page below each movie. If you can see the 
+movie name but not its showtimes, the data may be below the visible area — 
+scroll down, do not navigate away from the theater page.
 
 Stop at the first theater that has the movie. If the movie is not listed at any of
 the theaters, say so plainly."""
