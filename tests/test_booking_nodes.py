@@ -5,17 +5,23 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from paddington.agent.agent_loop import AgentResult
+from paddington.agent.booking_graph import initial_booking_state
 from paddington.agent.booking_nodes import (
+    ROUTE_CHECKOUT,
     ROUTE_INFORM_MOVIE_UNAVAILABLE,
     ROUTE_INFORM_NEEDS_RETRY,
+    ROUTE_INFORM_NO_SEATS,
     ROUTE_INFORM_THEATER_UNAVAILABLE,
     ROUTE_PRESENT_SEATS,
     ROUTE_PRESENT_SHOWTIMES,
     build_phase_1_node,
     build_phase_3_node,
+    build_phase_4_node,
     route_after_phase_1,
     route_after_phase_3,
+    route_after_phase_4,
 )
+from paddington.agent.booking_state import BookingState
 from paddington.agent.showtime_extraction import ExtractedShowtime, ShowtimeList
 from paddington.browser.browser_session import BrowserSession
 from paddington.schemas.browser import InteractiveElement, PageSnapshot
@@ -29,27 +35,49 @@ async def _fake_extractor(answer: str) -> ShowtimeList:
     )
 
 
+def _snapshot(elements: list[InteractiveElement] | None) -> PageSnapshot | None:
+    if elements is None:
+        return None
+    return PageSnapshot(
+        url="https://www.cinecolombia.com/cinemas/andino/",
+        title="",
+        markdown="",
+        interactive_elements=elements,
+        truncated=False,
+        total_chars=0,
+    )
+
+
 class _FakeSession:
-    """Minimal BrowserSession stand-in: the Phase 1 node only reads ``last_snapshot``."""
+    """BrowserSession stand-in. Phase 1 reads ``last_snapshot`` (showtime links); Phase 3
+    calls ``get_snapshot()`` for a fresh seat-page read."""
 
-    def __init__(self, last_snapshot: PageSnapshot | None = None) -> None:
+    def __init__(
+        self,
+        last_snapshot: PageSnapshot | None = None,
+        seat_snapshot: PageSnapshot | None = None,
+    ) -> None:
         self.last_snapshot = last_snapshot
+        self._seat_snapshot = seat_snapshot
 
-
-def _session(links: list[InteractiveElement] | None = None) -> BrowserSession:
-    snapshot = (
-        PageSnapshot(
-            url="https://www.cinecolombia.com/cinemas/andino/",
+    async def get_snapshot(self, *args, **kwargs) -> PageSnapshot:
+        if self._seat_snapshot is not None:
+            return self._seat_snapshot
+        return PageSnapshot(
+            url="",
             title="",
             markdown="",
-            interactive_elements=links,
+            interactive_elements=[],
             truncated=False,
             total_chars=0,
         )
-        if links is not None
-        else None
-    )
-    return cast(BrowserSession, _FakeSession(snapshot))
+
+
+def _session(
+    links: list[InteractiveElement] | None = None,
+    seats: list[InteractiveElement] | None = None,
+) -> BrowserSession:
+    return cast(BrowserSession, _FakeSession(_snapshot(links), _snapshot(seats)))
 
 
 @dataclass
@@ -176,7 +204,7 @@ async def test_node_leaves_url_none_when_no_link_matches() -> None:
     assert update["offered_showtimes"][0]["url"] is None
 
 
-# --- Phase 3: get to the seat map --------------------------------------------
+# --- Phase 3: get to the seat map + capture seats ----------------------------
 
 
 def _phase3_state(url: str | None = _SEAT_URL) -> dict:
@@ -188,14 +216,27 @@ def _phase3_state(url: str | None = _SEAT_URL) -> dict:
     }
 
 
-async def test_phase_3_reaches_seat_map_and_reports_status() -> None:
+def _seat_elements(available: bool = True) -> list[InteractiveElement]:
+    """A tiny seat-map snapshot: two seats (available or all taken) + one non-seat button."""
+    a1 = "Silla A1" if available else "Silla no disponible A1"
+    a2 = "Silla A2" if available else "Silla no disponible A2"
+    return [
+        InteractiveElement(ref="el_1", role="button", name="Iniciar sesión"),
+        InteractiveElement(ref="el_2", role="button", name=a1),
+        InteractiveElement(ref="el_3", role="button", name=a2),
+    ]
+
+
+async def test_phase_3_reaches_seat_map_and_captures_seats() -> None:
     fake = _FakeAgentLoop("The seat map is on screen.\nSTATUS: SEAT_MAP_VISIBLE")
-    node = build_phase_3_node(fake)
+    node = build_phase_3_node(fake, _session(seats=_seat_elements()))
 
     update = await node(_phase3_state(), _config("user-1:thread-9"))
 
     assert update["phase_outcome"] == "SEAT_MAP_VISIBLE"
     assert len(update["messages"]) == 1
+    # It parsed + persisted the seats (non-seat button dropped) for Phase 4.
+    assert [s["label"] for s in update["offered_seats"]] == ["A1", "A2"]
     # Runs on its own per-phase thread and is handed the direct seat URL (fast path).
     call = fake.calls[0]
     assert call["thread_id"] == "user-1:thread-9:p3"
@@ -203,9 +244,20 @@ async def test_phase_3_reaches_seat_map_and_reports_status() -> None:
     assert "Comprar sin registrarse" in call["system_prompt"]
 
 
+async def test_phase_3_no_available_seats_downgrades_to_needs_retry() -> None:
+    # Agent reported the map visible, but every parsed seat is taken → NEEDS_RETRY, no offer.
+    fake = _FakeAgentLoop("STATUS: SEAT_MAP_VISIBLE")
+    node = build_phase_3_node(fake, _session(seats=_seat_elements(available=False)))
+
+    update = await node(_phase3_state(), _config())
+
+    assert update["phase_outcome"] == "NEEDS_RETRY"
+    assert "offered_seats" not in update
+
+
 async def test_phase_3_without_url_falls_back_to_label_route() -> None:
     fake = _FakeAgentLoop("STATUS: SEAT_MAP_VISIBLE")
-    node = build_phase_3_node(fake)
+    node = build_phase_3_node(fake, _session(seats=_seat_elements()))
 
     await node(_phase3_state(url=None), _config())
 
@@ -218,7 +270,7 @@ async def test_phase_3_without_url_falls_back_to_label_route() -> None:
 
 async def test_phase_3_missing_status_downgrades_to_needs_retry() -> None:
     fake = _FakeAgentLoop("I got lost on the way to the seats.")
-    node = build_phase_3_node(fake)
+    node = build_phase_3_node(fake, _session())
 
     update = await node(_phase3_state(), _config())
 
@@ -235,3 +287,104 @@ async def test_phase_3_missing_status_downgrades_to_needs_retry() -> None:
 )
 def test_route_after_phase_3(outcome: str | None, expected_route: str) -> None:
     assert route_after_phase_3({"phase_outcome": outcome}) == expected_route
+
+
+# --- Phase 4: seat selection interrupt ---------------------------------------
+
+
+def _offered_seats() -> list[dict]:
+    return [
+        {"label": "A1", "row": "A", "number": 1, "available": True},
+        {"label": "A2", "row": "A", "number": 2, "available": False},  # taken
+        {"label": "B1", "row": "B", "number": 1, "available": True},
+        {"label": "B2", "row": "B", "number": 2, "available": True},
+    ]
+
+
+def _phase4_state(seat_quantity: int = 2) -> BookingState:
+    state = initial_booking_state(
+        movie="Dune 3",
+        date="Saturday",
+        preferred_multiplexes=["Andino"],
+        seat_quantity=seat_quantity,
+    )
+    state["offered_seats"] = _offered_seats()
+    return state
+
+
+async def _run_phase_4(state: BookingState, resume):
+    """Drive the Phase 4 interrupt node through a MemorySaver graph to a single resume.
+
+    A bare interrupt node can't be called directly, so wrap it in a one-node ``BookingState``
+    graph (the same way the real booking graph hosts it) and resume once with ``resume``.
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import Command
+
+    builder = StateGraph(BookingState)
+    builder.add_node("p4", build_phase_4_node())
+    builder.add_edge(START, "p4")
+    builder.add_edge("p4", END)
+    graph = builder.compile(checkpointer=MemorySaver())
+
+    config = {"configurable": {"thread_id": "p4-thread"}}
+    first = await graph.ainvoke(state, config)
+    if resume is None:
+        return first
+    return await graph.ainvoke(Command(resume=resume), config)
+
+
+async def test_phase_4_presents_available_seats_grouped_by_row() -> None:
+    first = await _run_phase_4(_phase4_state(), resume=None)
+
+    payload = first["__interrupt__"][0].value
+    assert payload["kind"] == "present_seats"
+    assert payload["seat_quantity"] == 2
+    assert payload["allow_reject"] is True
+    # Only available seats, grouped by row; the taken A2 is omitted.
+    assert payload["rows"] == {"A": ["A1"], "B": ["B1", "B2"]}
+
+
+async def test_phase_4_valid_selection_writes_chosen_seats() -> None:
+    final = await _run_phase_4(
+        _phase4_state(), resume={"action": "select", "seats": ["B1", "B2"]}
+    )
+    assert "__interrupt__" not in final
+    assert final["phase_outcome"] == "SEATS_CHOSEN"
+    assert final["chosen_seats"] == ["B1", "B2"]
+
+
+async def test_phase_4_reject_yields_no_seats() -> None:
+    final = await _run_phase_4(_phase4_state(), resume={"action": "reject"})
+    assert final["phase_outcome"] == "NO_SEATS"
+    assert final.get("chosen_seats") is None
+
+
+@pytest.mark.parametrize(
+    "bad_seats",
+    [
+        ["B1"],            # too few (seat_quantity is 2)
+        ["B1", "B2", "A1"],  # too many
+        ["A2", "B1"],      # A2 is taken (not in the available set)
+        ["Z9", "B1"],      # unknown label
+        ["B1", "B1"],      # duplicate
+    ],
+)
+async def test_phase_4_invalid_selection_reprompts(bad_seats: list[str]) -> None:
+    reprompt = await _run_phase_4(
+        _phase4_state(), resume={"action": "select", "seats": bad_seats}
+    )
+    assert "__interrupt__" in reprompt
+    assert reprompt["__interrupt__"][0].value["error"]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_route"),
+    [
+        ("SEATS_CHOSEN", ROUTE_CHECKOUT),
+        ("NO_SEATS", ROUTE_INFORM_NO_SEATS),
+    ],
+)
+def test_route_after_phase_4(outcome: str, expected_route: str) -> None:
+    assert route_after_phase_4({"phase_outcome": outcome}) == expected_route
