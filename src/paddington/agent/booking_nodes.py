@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
-from paddington.agent.agent_loop import AgentLoop
+from paddington.agent.agent_loop import AgentLoop, AgentRecursionLimitError
 from paddington.agent.booking_state import BookingState
 from paddington.agent.phase_prompts import (
     PHASE1_FOUND_SHOWTIMES,
@@ -30,9 +30,13 @@ from paddington.agent.phase_prompts import (
     PHASE3_STATUSES,
     PHASE4_NO_SEATS,
     PHASE4_SEATS_CHOSEN,
+    PHASE5_NEEDS_RETRY,
+    PHASE5_SEATS_SELECTED,
+    PHASE5_STATUSES,
     parse_phase_status,
     phase1_find_showtimes_prompt,
     phase3_get_to_seats_prompt,
+    phase5_select_seats_prompt,
 )
 from paddington.agent.seat_extraction import offered_seats, parse_seat_map
 from paddington.agent.showtime_extraction import (
@@ -73,10 +77,14 @@ ROUTE_INFORM_NO_SHOWTIME = "inform_no_showtime"
 # (seat selection).
 ROUTE_PRESENT_SEATS = "present_seats"
 
-# Route names returned by route_after_phase_4. ROUTE_CHECKOUT is Phase 5 (payment); it maps
-# to END as a placeholder until that slice lands. ROUTE_INFORM_NO_SEATS is the rejection exit.
-ROUTE_CHECKOUT = "checkout"
+# Route names returned by route_after_phase_4. ROUTE_SELECT_SEATS is the Phase 5 node
+# (click the chosen seats). ROUTE_INFORM_NO_SEATS is the rejection exit.
+ROUTE_SELECT_SEATS = "select_seats"  # Phase 5 node
 ROUTE_INFORM_NO_SEATS = "inform_no_seats"
+
+# Route name returned by route_after_phase_5. ROUTE_CHECKOUT is Phase 6 (payment); it maps
+# to END as a placeholder until that slice lands.
+ROUTE_CHECKOUT = "checkout"
 
 
 def build_phase_1_node(
@@ -437,8 +445,75 @@ def route_after_phase_4(state: BookingState) -> str:
     """Map Phase 4's outcome to the next node name (the conditional edge)."""
     if state["phase_outcome"] == PHASE4_NO_SEATS:
         return ROUTE_INFORM_NO_SEATS
-    # SEATS_CHOSEN -> Phase 5 (checkout/payment); placeholder END until that slice lands.
-    return ROUTE_CHECKOUT
+    # SEATS_CHOSEN -> Phase 5 (click the chosen seats on the seat map).
+    return ROUTE_SELECT_SEATS
+
+
+def build_phase_5_node(agent_loop: AgentLoop) -> PhaseNode:
+    """Build the Phase 5 node — drive the inner agent to click the chosen seats.
+
+    The lightest of the agent-driven phases (contrast Phase 1/3): the seat map is already
+    open (Phase 3 left it there; the Phase 4 interrupt does no browser action and the
+    ``BrowserSession`` persists across phases), and there is nothing to parse afterwards —
+    the LLM does the clicking. So the node needs only the ``AgentLoop``, not the session.
+
+    It hands the agent the durable seat *labels* (``chosen_seats``); the agent recovers each
+    seat's ref itself by taking a fresh snapshot and matching the accessible name
+    ``"Silla <LABEL>"`` — no ref is threaded through state (see ``seat_extraction``). Same
+    shape as Phase 3: build prompt -> run inner agent on an isolated ``:p5`` thread -> parse
+    the STATUS token -> write the outcome. A failure to cleanly select every seat (e.g. a
+    seat taken between Phase 4 and Phase 5) yields no valid status and downgrades to
+    ``NEEDS_RETRY``.
+    """
+
+    async def phase_5_select_seats(state: BookingState, config: RunnableConfig) -> dict:
+        chosen = state["chosen_seats"] or []
+        logger.info("phase5_selecting_seats", seats=chosen)
+
+        prompt = phase5_select_seats_prompt(chosen)
+
+        outer_thread_id = config.get("configurable", {}).get("thread_id", "default_thread_id")
+        try:
+            result = await agent_loop.run(
+                user_message=f"Select these seats on the seat map: {', '.join(chosen)}",
+                thread_id=f"{outer_thread_id}:p5",
+                system_prompt=prompt,
+            )
+        except AgentRecursionLimitError:
+            # The inner agent couldn't converge (classically: toggling seats without ever
+            # clicking the confirm button). Don't crash the whole booking graph — downgrade
+            # to NEEDS_RETRY like Phase 1/3's failure posture. The AgentLoop already logged
+            # the tool trace (the repeated call that reveals the loop) at limit time.
+            logger.warning("phase5_recursion_limit", seats=chosen)
+            return {
+                "phase_outcome": PHASE5_NEEDS_RETRY,
+                "messages": [
+                    AIMessage(content="I couldn't finish selecting the seats. Please try again.")
+                ],
+            }
+
+        outcome = parse_phase_status(result.answer, PHASE5_STATUSES, PHASE5_NEEDS_RETRY)
+        logger.info(
+            "phase5_completed",
+            outcome=outcome,
+            iterations=result.iterations,
+            tools_used=result.tools_used,
+        )
+        return {
+            "phase_outcome": outcome,
+            "messages": [AIMessage(content=result.answer)],
+        }
+
+    return phase_5_select_seats
+
+
+def route_after_phase_5(state: BookingState) -> str:
+    """Map Phase 5's outcome to the next node name (the conditional edge)."""
+    if state["phase_outcome"] == PHASE5_SEATS_SELECTED:
+        # -> Phase 6 (checkout/payment); placeholder END until that slice lands.
+        return ROUTE_CHECKOUT
+    # No valid status (couldn't select the seats) -> the generic retry inform exit.
+    return ROUTE_INFORM_NEEDS_RETRY
 
 
 async def inform_no_seats(state: BookingState) -> dict:

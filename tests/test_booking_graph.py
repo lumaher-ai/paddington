@@ -15,23 +15,31 @@ from paddington.schemas.browser import InteractiveElement, PageSnapshot
 
 # A Phase 3 answer that reaches the seat map, so a selection flows all the way through.
 _SEAT_MAP_ANSWER = "The seat map is on screen.\nSTATUS: SEAT_MAP_VISIBLE"
+# A Phase 5 answer that clicks the seats, so the flow runs to END.
+_SEATS_SELECTED_ANSWER = "Both seats are selected.\nSTATUS: SEATS_SELECTED"
 
 
 @dataclass
 class _FakeAgentLoop:
     """Stand-in for AgentLoop: returns a per-phase canned answer so the graph runs through.
 
-    Phase 1 and Phase 3 both run the inner agent; they are told apart by the isolated
-    thread-id suffix (``:p1`` / ``:p3``) so one fake can serve both with distinct STATUS
-    lines.
+    Phases 1, 3, and 5 all run the inner agent; they are told apart by the isolated
+    thread-id suffix (``:p1`` / ``:p3`` / ``:p5``) so one fake can serve all three with
+    distinct STATUS lines.
     """
 
     answer: str
     phase3_answer: str = _SEAT_MAP_ANSWER
+    phase5_answer: str = _SEATS_SELECTED_ANSWER
 
     async def run(self, **kwargs) -> AgentResult:
         thread_id = kwargs.get("thread_id", "")
-        answer = self.phase3_answer if thread_id.endswith(":p3") else self.answer
+        if thread_id.endswith(":p3"):
+            answer = self.phase3_answer
+        elif thread_id.endswith(":p5"):
+            answer = self.phase5_answer
+        else:
+            answer = self.answer
         return AgentResult(
             answer=answer,
             iterations=1,
@@ -196,8 +204,25 @@ async def test_full_flow_selecting_seats_reaches_end() -> None:
     )
 
     assert "__interrupt__" not in final
-    assert final["phase_outcome"] == "SEATS_CHOSEN"
+    # The pick flows into Phase 5, which clicks the seats and reports SEATS_SELECTED.
+    assert final["phase_outcome"] == "SEATS_SELECTED"
     assert final["chosen_seats"] == ["A1", "A2"]
+
+
+async def test_phase_5_failure_routes_to_inform_needs_retry() -> None:
+    loop = _FakeAgentLoop(_FOUND_ANSWER, phase5_answer="Couldn't click the seats.")
+    graph = _graph(_FOUND_ANSWER, loop=loop)
+
+    await graph.ainvoke(_state(), config=_CONFIG)
+    await graph.ainvoke(Command(resume={"action": "select", "showtime_id": "st_2"}), config=_CONFIG)
+    final = await graph.ainvoke(
+        Command(resume={"action": "select", "seats": ["A1", "A2"]}), config=_CONFIG
+    )
+
+    # Phase 5 emitted no valid STATUS → NEEDS_RETRY → inform exit with the retry message.
+    assert "__interrupt__" not in final
+    assert final["phase_outcome"] == "NEEDS_RETRY"
+    assert "Please try again" in _contents(final)
 
 
 async def test_rejecting_seats_routes_to_inform_no_seats() -> None:

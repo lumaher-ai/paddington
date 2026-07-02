@@ -14,12 +14,15 @@ from paddington.agent.booking_nodes import (
     ROUTE_INFORM_THEATER_UNAVAILABLE,
     ROUTE_PRESENT_SEATS,
     ROUTE_PRESENT_SHOWTIMES,
+    ROUTE_SELECT_SEATS,
     build_phase_1_node,
     build_phase_3_node,
     build_phase_4_node,
+    build_phase_5_node,
     route_after_phase_1,
     route_after_phase_3,
     route_after_phase_4,
+    route_after_phase_5,
 )
 from paddington.agent.booking_state import BookingState
 from paddington.agent.showtime_extraction import ExtractedShowtime, ShowtimeList
@@ -82,17 +85,24 @@ def _session(
 
 @dataclass
 class _FakeAgentLoop:
-    """Stand-in for AgentLoop: records run() kwargs and returns a canned answer."""
+    """Stand-in for AgentLoop: records run() kwargs and returns a canned answer.
+
+    Pass ``raises`` to simulate the inner agent failing (e.g. hitting the recursion limit)
+    so the phase node's error handling can be exercised without a live loop.
+    """
 
     answer: str
     calls: list[dict]
 
-    def __init__(self, answer: str) -> None:
+    def __init__(self, answer: str, raises: Exception | None = None) -> None:
         self.answer = answer
         self.calls = []
+        self._raises = raises
 
     async def run(self, **kwargs) -> AgentResult:
         self.calls.append(kwargs)
+        if self._raises is not None:
+            raise self._raises
         return AgentResult(
             answer=self.answer,
             iterations=1,
@@ -382,9 +392,67 @@ async def test_phase_4_invalid_selection_reprompts(bad_seats: list[str]) -> None
 @pytest.mark.parametrize(
     ("outcome", "expected_route"),
     [
-        ("SEATS_CHOSEN", ROUTE_CHECKOUT),
+        ("SEATS_CHOSEN", ROUTE_SELECT_SEATS),
         ("NO_SEATS", ROUTE_INFORM_NO_SEATS),
     ],
 )
 def test_route_after_phase_4(outcome: str, expected_route: str) -> None:
     assert route_after_phase_4({"phase_outcome": outcome}) == expected_route
+
+
+# --- Phase 5: click the chosen seats -----------------------------------------
+
+
+def _phase5_state(chosen: list[str] | None = None) -> dict:
+    return {"chosen_seats": chosen if chosen is not None else ["K10", "K11"]}
+
+
+async def test_phase_5_clicks_seats_and_reports_selected() -> None:
+    fake = _FakeAgentLoop("Both seats are now selected.\nSTATUS: SEATS_SELECTED")
+    node = build_phase_5_node(fake)
+
+    update = await node(_phase5_state(), _config("user-1:thread-9"))
+
+    assert update["phase_outcome"] == "SEATS_SELECTED"
+    assert len(update["messages"]) == 1
+    assert isinstance(update["messages"][0], AIMessage)
+    # Runs on its own per-phase thread; the prompt lists the chosen seats by name.
+    call = fake.calls[0]
+    assert call["thread_id"] == "user-1:thread-9:p5"
+    assert '"Silla K10"' in call["system_prompt"]
+    assert '"Silla K11"' in call["system_prompt"]
+
+
+async def test_phase_5_missing_status_downgrades_to_needs_retry() -> None:
+    fake = _FakeAgentLoop("I couldn't find one of the seat buttons.")
+    node = build_phase_5_node(fake)
+
+    update = await node(_phase5_state(), _config())
+
+    assert update["phase_outcome"] == "NEEDS_RETRY"
+
+
+async def test_phase_5_recursion_limit_downgrades_to_needs_retry() -> None:
+    # A toggling agent hits the recursion limit; the node must not crash the graph — it
+    # downgrades to NEEDS_RETRY (like Phase 1/3) so the outer flow ends cleanly.
+    from paddington.agent.agent_loop import AgentRecursionLimitError
+
+    fake = _FakeAgentLoop("", raises=AgentRecursionLimitError("step limit"))
+    node = build_phase_5_node(fake)
+
+    update = await node(_phase5_state(), _config())
+
+    assert update["phase_outcome"] == "NEEDS_RETRY"
+    assert isinstance(update["messages"][0], AIMessage)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_route"),
+    [
+        ("SEATS_SELECTED", ROUTE_CHECKOUT),
+        ("NEEDS_RETRY", ROUTE_INFORM_NEEDS_RETRY),
+        (None, ROUTE_INFORM_NEEDS_RETRY),
+    ],
+)
+def test_route_after_phase_5(outcome: str | None, expected_route: str) -> None:
+    assert route_after_phase_5({"phase_outcome": outcome}) == expected_route

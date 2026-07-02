@@ -230,6 +230,9 @@ class AgentLoop:
                 max_iterations=self._config.max_iterations,
                 recursion_limit=invoke_config["recursion_limit"],
                 thread_id=thread_id,
+                # The compact tool trace is the whole point on this path: a loop shows up
+                # as the same call repeated (e.g. click(el_142) toggling a seat on/off).
+                tool_trace=await self._recent_tool_trace(thread_id),
             )
             raise AgentRecursionLimitError(
                 f"Agent stopped after reaching its step limit "
@@ -276,6 +279,33 @@ class AgentLoop:
             total_output_tokens=total_output,
             total_cost_usd=round(total_cost, 6),
         )
+
+    async def _recent_tool_trace(self, thread_id: str, limit: int = 16) -> list[str]:
+        """Best-effort compact trace of the last tool calls (name + key arg) for debugging.
+
+        Read from the persisted checkpoint after a failure (e.g. a recursion limit) so the
+        log shows *what the agent actually did*. Each entry is ``name(detail)`` where detail
+        is the click ref / navigate url when present — a loop then reads as the same call
+        repeated. Returns ``[]`` if state can't be read (no checkpointer, unknown thread).
+        """
+        if self._checkpointer is None:
+            return []
+        try:
+            snapshot = await self._graph.aget_state({"configurable": {"thread_id": thread_id}})
+        except Exception:  # noqa: BLE001 — tracing must never mask the original error
+            return []
+        if not snapshot or not snapshot.values:
+            return []
+        trace: list[str] = []
+        for m in snapshot.values.get("messages", []):
+            if not isinstance(m, AIMessage):
+                continue
+            for tc in m.tool_calls or []:
+                args = tc.get("args") or {}
+                detail = args.get("ref") or args.get("url") or ""
+                name = tc.get("name")
+                trace.append(f"{name}({detail})" if detail else str(name))
+        return trace[-limit:]
 
 
 def _accumulate_usage(messages: list, model: str) -> tuple[float, int, int]:

@@ -13,6 +13,7 @@ from paddington.agent.phase_prompts import (
     build_phase_prompt,
     parse_phase_status,
     phase1_find_showtimes_prompt,
+    phase5_select_seats_prompt,
 )
 
 
@@ -44,6 +45,24 @@ def test_phase1_prompt_interpolates_booking_params() -> None:
     assert "FOUND_SHOWTIMES" in prompt
     assert "MOVIE_NOT_FOUND" in prompt
     assert "THEATER_UNAVAILABLE" in prompt
+
+
+def test_phase5_prompt_lists_chosen_seats_as_accessible_names() -> None:
+    prompt = phase5_select_seats_prompt(["K10", "K11"])
+    assert BROWSER_BASE_PROMPT in prompt
+    # Each label is rendered as the seat button's accessible name the agent matches on.
+    assert '"Silla K10"' in prompt
+    assert '"Silla K11"' in prompt
+    # The companion-seat variant is called out so an exact-string match isn't assumed.
+    assert "acompañante" in prompt
+    # The anti-toggle rule: never re-click a selected seat (that deselects it → loop).
+    assert "EXACTLY ONCE" in prompt
+    assert "DESELECTS" in prompt
+    # After selecting, the agent must click the confirm button to advance.
+    assert "Seleccionar boletas" in prompt
+    assert "Stop and report your findings as soon as" in prompt
+    # Only the happy outcome token is advertised in the STATUS instruction.
+    assert "SEATS_SELECTED" in prompt
 
 
 def test_resolve_system_prompt_returns_per_phase_when_set() -> None:

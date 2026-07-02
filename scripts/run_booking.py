@@ -31,9 +31,9 @@ from paddington.browser.tools import build_browser_tools
 from paddington.config import get_settings
 
 # --- What to book (edit these) ------------------------------------------------
-MOVIE = "Toy Story 5"
+MOVIE = "Minions & Monsters"
 DATE = "Hoy"  # "Hoy" = today, or a date as the site shows it
-THEATERS = ["Andino", "Avenida Chile"]
+THEATERS = ["Andino"]
 SEAT_QUANTITY = 2
 
 
@@ -122,7 +122,9 @@ async def main() -> None:
 
             config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
             state = initial_booking_state(
-                movie=MOVIE, date=DATE, preferred_multiplexes=THEATERS,
+                movie=MOVIE,
+                date=DATE,
+                preferred_multiplexes=THEATERS,
                 seat_quantity=SEAT_QUANTITY,
             )
 
