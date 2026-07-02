@@ -158,7 +158,14 @@ def default_showtime_extractor(model: str) -> ShowtimeExtractor:
     ``ShowtimeList`` or raise. The caller (the Phase 1 node) treats a raise as
     ``PHASE1_NEEDS_RETRY``; this function does not swallow errors.
     """
-    structured = build_structuring_llm(model).with_structured_output(ShowtimeList)
+    # Use function calling, not the default strict json_schema: OpenAI's strict
+    # response_format requires EVERY property in ``required``, which rejects our optional
+    # ``format``/``language`` (they carry ``default=None``). Function calling binds the
+    # schema as a tool — lenient about optional fields and translated uniformly across the
+    # OpenAI primary and the Anthropic fallback by litellm.
+    structured = build_structuring_llm(model).with_structured_output(
+        ShowtimeList, method="function_calling"
+    )
 
     async def extract(answer: str) -> ShowtimeList:
         # ``with_structured_output(ShowtimeList)`` is statically typed as ``dict | BaseModel``
