@@ -106,6 +106,13 @@ PHASE3_STATUSES = {
     PHASE3_SEAT_MAP_VISIBLE,
 }
 
+# Phase 4 outcome tokens. Like PHASE2_* (and unlike PHASE1/PHASE3), these are NOT
+# LLM-declared STATUS lines — Phase 4 has no inner agent. The node produces them from the
+# user's (validated) resume value at the seat-selection interrupt, and route_after_phase_4
+# maps them to edges: CHOSEN -> checkout (Phase 5), NO_SEATS -> inform_no_seats -> END.
+PHASE4_SEATS_CHOSEN = "SEATS_CHOSEN"
+PHASE4_NO_SEATS = "NO_SEATS"
+
 # Theater-first navigation. cinecolombia.com lists each multiplex's movies on its own
 # /cinemas/<slug>/ page, which avoids the Cloudflare-blocked movie-detail page. We map
 # friendly theater names to those URLs; preferred_multiplexes stays as names so the
@@ -132,14 +139,23 @@ def _theater_url(name: str) -> str:
 _PHASE1_GOAL = """\
 Find showtimes for "{movie}" on {date}.
 
-Try these theaters in priority order — navigate directly to each URL. Move to the
-next one only if the movie isn't listed at the current one:
+Navigate these theater in priority order - directly to each URL. Move to the
+next one only if the movie isn't listed at the first one:
 {theaters_block}
 
 For each theater:
 1. navigate_to its URL directly
-2. find "{movie}" in that theater's listings (scroll if needed)
-3. select the date {date} and reveal its showtimes
+2. find "{movie}" in that theater's listings
+3. Below the movie name is listed the showtimes (scroll down to find it)
+4. Select the date {date} and reveal its showtimes
+
+Do NOT use take_screenshot — the showtimes/seat data are text/DOM. Use get_snapshot
+only. Screenshots waste tokens and add nothing here.
+
+IMPORTANT: Do NOT click on movie titles or poster links. The showtimes are 
+listed directly on the theater page below each movie. If you can see the 
+movie name but not its showtimes, the data may be below the visible area — 
+scroll down, do not navigate away from the theater page.
 
 Stop at the first theater that has the movie. If the movie is not listed at any of
 the theaters, say so plainly."""
@@ -228,4 +244,77 @@ def phase3_get_to_seats_prompt(
         goal=goal,
         ends_when=_PHASE3_ENDS_WHEN,
         statuses=PHASE3_STATUSES,
+    )
+
+
+# --- Phase 5: select (click) the chosen seats --------------------------------
+# The seat map is already open (Phase 3 left it there; the Phase 4 interrupt performs no
+# browser action and the BrowserSession persists across phases). The agent recovers each
+# seat's ref itself: it takes a fresh snapshot and matches the accessible name — no ref is
+# threaded through state (Phase 3's offered_seats keeps only the durable label; see
+# seat_extraction). Reconstructing the name from a label is a plain f"Silla {label}".
+
+# Phase 5 outcomes. Like Phase 3, only the happy token is advertised in the STATUS
+# instruction; NEEDS_RETRY is the parser fallback when the agent can't cleanly select
+# every seat (e.g. a seat was taken between Phase 4 and Phase 5, or the map expired).
+PHASE5_SEATS_SELECTED = "SEATS_SELECTED"
+PHASE5_NEEDS_RETRY = "NEEDS_RETRY"  # fallback / no valid status
+
+PHASE5_STATUSES = {
+    PHASE5_SEATS_SELECTED,
+}
+
+_PHASE5_GOAL = """\
+Select the seats the user chose, then confirm the selection to advance.
+The interactive seat map is already open from the previous step.
+
+Seats to select: {named_seats}
+
+Work through the chosen seats ONE AT A TIME:
+1. get_snapshot to read the current seat map and its fresh element refs.
+2. Find the button for the next chosen seat you have NOT clicked yet. An available
+   seat's accessible name ends with its label — "Silla K10", or for a companion
+   seat "Silla acompañante K10". Skip any seat whose name contains "no disponible"
+   (already taken).
+3. click that seat's ref exactly once. Clicking selects the seat.
+4. get_snapshot again — the click changed the page and regenerated every ref.
+
+CRITICAL — do not toggle seats. Click each chosen seat EXACTLY ONCE. Keep track of
+which seats you have already clicked; a seat you already selected will look
+different now (highlighted, or its name changes — e.g. it no longer reads plainly
+"Silla <LABEL>"). NEVER click a seat you have already selected: a second click
+DESELECTS it and you will loop forever. If all your chosen seats already appear
+selected, stop clicking seats and move on.
+
+Once EVERY chosen seat is selected, confirm the selection:
+5. Find and click the button that continues to the next step — the bottom button
+   labelled "Seleccionar boletas" (accept "Continuar" or "Confirmar" if that exact
+   label is not present). It may only appear once the required number of seats is
+   selected, so if you do not see it, get_snapshot once more and look again.
+6. get_snapshot to verify the page advanced past the seat map.
+
+If a chosen seat is missing or reads "no disponible", do not substitute another
+seat — report that you could not select it. Do NOT log in or enter any payment
+details; your job ends once you have clicked "Seleccionar boletas"."""
+
+_PHASE5_ENDS_WHEN = (
+    'every chosen seat is selected and you have clicked "Seleccionar boletas" '
+    '("Continuar"/"Confirmar") to advance past the seat map (or a chosen seat is '
+    "unavailable and cannot be selected)"
+)
+
+
+def phase5_select_seats_prompt(chosen_seats: list[str]) -> str:
+    """System prompt for Phase 5 — click each chosen seat on the open seat map.
+
+    ``chosen_seats`` are the durable labels the Phase 4 interrupt validated and persisted
+    (e.g. ``["K10", "K11"]``). Each is rendered as its expected accessible name
+    (``"Silla K10"``) so the agent can find the matching button in a fresh snapshot and
+    click its ref — the ref itself is never carried in state (see ``seat_extraction``).
+    """
+    named_seats = ", ".join(f'"Silla {label}"' for label in chosen_seats)
+    return build_phase_prompt(
+        goal=_PHASE5_GOAL.format(named_seats=named_seats),
+        ends_when=_PHASE5_ENDS_WHEN,
+        statuses=PHASE5_STATUSES,
     )

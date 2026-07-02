@@ -41,7 +41,7 @@ def build_browser_tools(session: BrowserSession) -> list[BaseTool]:
         return await session.navigate(url, wait_until=wait_until, timeout_ms=timeout_ms)
 
     @tool
-    async def get_snapshot(max_chars: int = 8_000) -> PageSnapshot:
+    async def get_snapshot(max_chars: int = 6_500) -> PageSnapshot:
         """Return the current page as cleaned markdown plus a list of refs for
         interactive elements (links, buttons, inputs).
 

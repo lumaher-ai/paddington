@@ -58,7 +58,7 @@ class Settings(BaseSettings):
         description="Default LLM model for completions",
     )
     fallback_model: str = Field(
-        default="claude-sonnet-4-20250514",
+        default="claude-haiku-4-5-20251001",
         description="Fallback model if primary fails",
     )
 

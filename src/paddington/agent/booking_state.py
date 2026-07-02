@@ -51,6 +51,10 @@ class BookingState(TypedDict):
     # so Phase 3 can navigate straight to the seat map. ``None`` when Phase 1 found no
     # matching link — Phase 3 then re-grounds by ``chosen_showtime`` label instead.
     chosen_showtime_url: str | None
-    seat_section: str | None
+    # Seats Phase 3 parsed from the seat map and persisted, e.g.
+    # ``[{"label": "F5", "row": "F", "number": 5, "available": True}, ...]``. Persisting
+    # them here makes the Phase 4 interrupt node a pure read on resume (validates the
+    # user's picks against these labels — no re-parse, no drift). See ``seat_extraction``.
+    offered_seats: list[dict] | None
     chosen_seats: list[str] | None
     payment_link: str | None

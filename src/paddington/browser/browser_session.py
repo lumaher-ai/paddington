@@ -159,7 +159,7 @@ class BrowserSession:
             error=error,
         )
 
-    async def get_snapshot(self, max_chars: int = 8_000) -> PageSnapshot:
+    async def get_snapshot(self, max_chars: int = 6_500) -> PageSnapshot:
         self._ref_map.clear()
 
         # Let any in-flight navigation settle before we read the page. A snapshot
