@@ -106,6 +106,13 @@ PHASE3_STATUSES = {
     PHASE3_SEAT_MAP_VISIBLE,
 }
 
+# Phase 4 outcome tokens. Like PHASE2_* (and unlike PHASE1/PHASE3), these are NOT
+# LLM-declared STATUS lines — Phase 4 has no inner agent. The node produces them from the
+# user's (validated) resume value at the seat-selection interrupt, and route_after_phase_4
+# maps them to edges: CHOSEN -> checkout (Phase 5), NO_SEATS -> inform_no_seats -> END.
+PHASE4_SEATS_CHOSEN = "SEATS_CHOSEN"
+PHASE4_NO_SEATS = "NO_SEATS"
+
 # Theater-first navigation. cinecolombia.com lists each multiplex's movies on its own
 # /cinemas/<slug>/ page, which avoids the Cloudflare-blocked movie-detail page. We map
 # friendly theater names to those URLs; preferred_multiplexes stays as names so the

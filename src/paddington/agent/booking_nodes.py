@@ -28,10 +28,13 @@ from paddington.agent.phase_prompts import (
     PHASE3_NEEDS_RETRY,
     PHASE3_SEAT_MAP_VISIBLE,
     PHASE3_STATUSES,
+    PHASE4_NO_SEATS,
+    PHASE4_SEATS_CHOSEN,
     parse_phase_status,
     phase1_find_showtimes_prompt,
     phase3_get_to_seats_prompt,
 )
+from paddington.agent.seat_extraction import offered_seats, parse_seat_map
 from paddington.agent.showtime_extraction import (
     ShowtimeExtractor,
     default_showtime_extractor,
@@ -66,9 +69,14 @@ ROUTE_INFORM_NEEDS_RETRY = "inform_needs_retry"
 ROUTE_GET_TO_SEATS = "get_to_seats"  # Phase 3 node
 ROUTE_INFORM_NO_SHOWTIME = "inform_no_showtime"
 
-# Route names returned by route_after_phase_3. ROUTE_PRESENT_SEATS is Phase 4 (seat
-# selection); it maps to END as a placeholder until that slice lands.
+# Route names returned by route_after_phase_3. ROUTE_PRESENT_SEATS is the Phase 4 node
+# (seat selection).
 ROUTE_PRESENT_SEATS = "present_seats"
+
+# Route names returned by route_after_phase_4. ROUTE_CHECKOUT is Phase 5 (payment); it maps
+# to END as a placeholder until that slice lands. ROUTE_INFORM_NO_SEATS is the rejection exit.
+ROUTE_CHECKOUT = "checkout"
+ROUTE_INFORM_NO_SEATS = "inform_no_seats"
 
 
 def build_phase_1_node(
@@ -285,14 +293,20 @@ def route_after_phase_2(state: BookingState) -> str:
     return ROUTE_GET_TO_SEATS
 
 
-def build_phase_3_node(agent_loop: AgentLoop) -> PhaseNode:
-    """Build the Phase 3 node — drive the inner agent from the chosen showtime to the seat map.
+def build_phase_3_node(agent_loop: AgentLoop, session: BrowserSession) -> PhaseNode:
+    """Build the Phase 3 node — drive the inner agent to the seat map, then capture the seats.
 
     A thin navigation phase: it hands the inner agent the chosen showtime's code-owned
     seat URL (fast path) and human label (fallback), plus the theater list for the fallback
     route, then lets the agent navigate, clear the guest-checkout interstitial, and confirm
     the seat map. Mirrors the Phase 1 node's shape (build prompt -> run inner agent on an
     isolated ``:p3`` thread -> parse the STATUS token -> write the outcome back).
+
+    On success it also parses the seat map — the same producer/consumer split as Phase 1:
+    this node reads the structured seats and persists ``offered_seats`` so the Phase 4
+    interrupt is a pure read. Parsing is pure code (``seat_extraction``), so unlike Phase 1
+    there is no LLM extraction step. It takes a fresh ``session.get_snapshot()`` rather than
+    trusting the agent's last snapshot, guaranteeing the seat page is what gets parsed.
     """
 
     async def phase_3_get_to_seats(state: BookingState, config: RunnableConfig) -> dict:
@@ -314,10 +328,25 @@ def build_phase_3_node(agent_loop: AgentLoop) -> PhaseNode:
         )
 
         outcome = parse_phase_status(result.answer, PHASE3_STATUSES, PHASE3_NEEDS_RETRY)
-        return {
+        update: dict = {
             "phase_outcome": outcome,
             "messages": [AIMessage(content=result.answer)],
         }
+
+        # On the happy path, capture the seat map for Phase 4. A fresh snapshot guarantees
+        # we parse the settled seat page regardless of the agent's last action. No available
+        # seats (wrong page, mistimed render, or sold out) is downgraded to NEEDS_RETRY —
+        # same posture as Phase 1's empty extraction — rather than presenting an empty map.
+        if outcome == PHASE3_SEAT_MAP_VISIBLE:
+            snapshot = await session.get_snapshot()
+            seats = parse_seat_map(snapshot.interactive_elements)
+            if not any(s.available for s in seats):
+                logger.warning("phase3_no_available_seats", parsed=len(seats))
+                update["phase_outcome"] = PHASE3_NEEDS_RETRY
+            else:
+                update["offered_seats"] = offered_seats(seats)
+
+        return update
 
     return phase_3_get_to_seats
 
@@ -325,9 +354,105 @@ def build_phase_3_node(agent_loop: AgentLoop) -> PhaseNode:
 def route_after_phase_3(state: BookingState) -> str:
     """Map Phase 3's outcome to the next node name (the conditional edge)."""
     if state["phase_outcome"] == PHASE3_SEAT_MAP_VISIBLE:
-        # -> Phase 4 (seat selection); placeholder END until that slice lands.
-        return ROUTE_PRESENT_SEATS
+        return ROUTE_PRESENT_SEATS  # -> Phase 4 (seat selection)
     return ROUTE_INFORM_NEEDS_RETRY
+
+
+def _group_seats_by_row(available: list[dict]) -> dict[str, list[str]]:
+    """Group available seat labels by row for a readable interrupt payload.
+
+    e.g. ``{"A": ["A5", "A6", "A7"], "B": ["B1", "B2", ...]}``. Rows and seats keep the
+    order they were parsed in (page/visual order), so the client can render the map top-down.
+    """
+    rows: dict[str, list[str]] = {}
+    for seat in available:
+        rows.setdefault(seat["row"], []).append(seat["label"])
+    return rows
+
+
+def build_phase_4_node() -> PhaseNode:
+    """Build the Phase 4 node — present the seat map and pause for the user's choice.
+
+    Phase 2's twin: a *pure read* over ``offered_seats`` (persisted by Phase 3), so on resume
+    it re-runs from the top without re-deriving options. One compound interrupt carries every
+    available seat (grouped by row) and how many to pick; the user answers section-and-seats
+    in a single message. The resume value is untrusted, so a bad pick re-interrupts rather
+    than being trusted — same validation-retry loop as Phase 2.
+    """
+
+    async def phase_4_present_seats(state: BookingState, config: RunnableConfig) -> dict:
+        offered = state.get("offered_seats") or []
+        seat_quantity = state["seat_quantity"]
+        available = [s for s in offered if s["available"]]
+        available_labels = {s["label"] for s in available}
+
+        payload = {
+            "kind": "present_seats",  # discriminator: which interrupt is this
+            "prompt": f"Pick {seat_quantity} seat(s).",
+            "seat_quantity": seat_quantity,
+            "rows": _group_seats_by_row(available),
+            "allow_reject": True,
+        }
+
+        # Validation-retry loop: the resume value crosses the API boundary untrusted. On each
+        # resume the node replays from the top; earlier interrupts return their prior values
+        # and the loop reaches the still-pending one with the new value (see Phase 2).
+        attempt = 0
+        while True:
+            attempt += 1
+            response = interrupt(payload)
+            action = response.get("action") if isinstance(response, dict) else None
+
+            if action == "reject":
+                return {"phase_outcome": PHASE4_NO_SEATS}
+
+            if action == "select":
+                chosen = response.get("seats")
+                if (
+                    isinstance(chosen, list)
+                    and len(chosen) == seat_quantity
+                    and all(label in available_labels for label in chosen)
+                    and len(set(chosen)) == len(chosen)
+                ):
+                    return {
+                        "phase_outcome": PHASE4_SEATS_CHOSEN,
+                        # Durable seat labels (not snapshot-scoped refs): a later checkout
+                        # phase re-grounds on the live page by these labels.
+                        "chosen_seats": chosen,
+                    }
+
+            # Invalid pick (wrong count, unknown/duplicate label, malformed): re-prompt with a
+            # specific error. Debug, not warning — it's handled gracefully and re-fires on every
+            # later resume as the loop replays. ``attempt`` distinguishes those replays.
+            logger.debug("phase4_invalid_resume_value", attempt=attempt, response=str(response))
+            payload = {
+                **payload,
+                "error": f"Please choose exactly {seat_quantity} available seat(s) by label.",
+            }
+
+    return phase_4_present_seats
+
+
+def route_after_phase_4(state: BookingState) -> str:
+    """Map Phase 4's outcome to the next node name (the conditional edge)."""
+    if state["phase_outcome"] == PHASE4_NO_SEATS:
+        return ROUTE_INFORM_NO_SEATS
+    # SEATS_CHOSEN -> Phase 5 (checkout/payment); placeholder END until that slice lands.
+    return ROUTE_CHECKOUT
+
+
+async def inform_no_seats(state: BookingState) -> dict:
+    """The user rejected the seat map — acknowledge and end."""
+    return {
+        "messages": [
+            AIMessage(
+                content=(
+                    "No problem — I won't reserve any seats for that showtime. "
+                    "Let me know if you'd like to pick a different showtime or start over."
+                )
+            )
+        ]
+    }
 
 
 async def inform_no_showtime(state: BookingState) -> dict:

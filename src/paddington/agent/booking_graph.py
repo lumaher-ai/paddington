@@ -6,9 +6,10 @@ phases and whose edges encode the happy path plus the unhappy-path early exits. 
 phases' actual browser work is delegated to the inner ReAct agent via the phase nodes in
 ``booking_nodes``; this module only wires them together.
 
-Phases 1-3 are wired: Phase 1 finds showtimes, Phase 2 interrupts for the user's choice,
-Phase 3 navigates to the seat map. Phase 3's ``SEAT_MAP_VISIBLE`` branch stops at ``END``
-as a placeholder for Phase 4 (seat selection, a later slice).
+Phases 1-4 are wired: Phase 1 finds showtimes, Phase 2 interrupts for the user's choice,
+Phase 3 navigates to the seat map and parses the seats, Phase 4 interrupts for the user's
+seat picks. Phase 4's ``SEATS_CHOSEN`` branch stops at ``END`` as a placeholder for Phase 5
+(checkout/payment, a later slice).
 """
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -17,9 +18,11 @@ from langgraph.graph.state import CompiledStateGraph
 
 from paddington.agent.agent_loop import AgentLoop
 from paddington.agent.booking_nodes import (
+    ROUTE_CHECKOUT,
     ROUTE_GET_TO_SEATS,
     ROUTE_INFORM_MOVIE_UNAVAILABLE,
     ROUTE_INFORM_NEEDS_RETRY,
+    ROUTE_INFORM_NO_SEATS,
     ROUTE_INFORM_NO_SHOWTIME,
     ROUTE_INFORM_THEATER_UNAVAILABLE,
     ROUTE_PRESENT_SEATS,
@@ -27,13 +30,16 @@ from paddington.agent.booking_nodes import (
     build_phase_1_node,
     build_phase_2_node,
     build_phase_3_node,
+    build_phase_4_node,
     inform_movie_unavailable,
     inform_needs_retry,
+    inform_no_seats,
     inform_no_showtime,
     inform_theater_unavailable,
     route_after_phase_1,
     route_after_phase_2,
     route_after_phase_3,
+    route_after_phase_4,
 )
 from paddington.agent.booking_state import BookingState
 from paddington.agent.showtime_extraction import ShowtimeExtractor
@@ -71,9 +77,12 @@ def build_booking_graph(
     # Registered under ROUTE_PRESENT_SHOWTIMES so the conditional edge's path_map
     # routes the FOUND_SHOWTIMES branch straight to it.
     builder.add_node(ROUTE_PRESENT_SHOWTIMES, build_phase_2_node())
-    # Phase 3 drives the chosen showtime to the seat map. Registered under
-    # ROUTE_GET_TO_SEATS so Phase 2's path_map routes SHOWTIME_CHOSEN straight to it.
-    builder.add_node(ROUTE_GET_TO_SEATS, build_phase_3_node(agent_loop))
+    # Phase 3 drives the chosen showtime to the seat map and parses the seats. Registered
+    # under ROUTE_GET_TO_SEATS so Phase 2's path_map routes SHOWTIME_CHOSEN straight to it.
+    builder.add_node(ROUTE_GET_TO_SEATS, build_phase_3_node(agent_loop, session))
+    # Phase 4 presents Phase 3's seats and interrupts for the user's choice. Registered
+    # under ROUTE_PRESENT_SEATS so Phase 3's path_map routes SEAT_MAP_VISIBLE straight to it.
+    builder.add_node(ROUTE_PRESENT_SEATS, build_phase_4_node())
     # Inform nodes registered under their route-constant names so the conditional
     # edge's path_map maps each route string straight to its node.
     builder.add_node(ROUTE_INFORM_MOVIE_UNAVAILABLE, inform_movie_unavailable)
@@ -81,6 +90,8 @@ def build_booking_graph(
     builder.add_node(ROUTE_INFORM_NEEDS_RETRY, inform_needs_retry)
     # Phase 2's rejection exit (mermaid edge E3): the user wanted none of the showtimes.
     builder.add_node(ROUTE_INFORM_NO_SHOWTIME, inform_no_showtime)
+    # Phase 4's rejection exit: the user wanted none of the offered seats.
+    builder.add_node(ROUTE_INFORM_NO_SEATS, inform_no_seats)
 
     builder.add_edge(START, "phase_1")
     builder.add_conditional_edges(
@@ -103,21 +114,32 @@ def build_booking_graph(
             ROUTE_INFORM_NO_SHOWTIME: ROUTE_INFORM_NO_SHOWTIME,
         },
     )
-    # After Phase 3: a visible seat map flows to Phase 4 (seat selection), which doesn't
-    # exist yet, so ROUTE_PRESENT_SEATS maps to END as a placeholder. A failure to reach
-    # the seat map routes to the needs-retry inform exit.
+    # After Phase 3: a visible seat map (with parsed seats) flows to Phase 4 (seat
+    # selection); a failure to reach it routes to the needs-retry inform exit.
     builder.add_conditional_edges(
         ROUTE_GET_TO_SEATS,
         route_after_phase_3,
         {
-            ROUTE_PRESENT_SEATS: END,
+            ROUTE_PRESENT_SEATS: ROUTE_PRESENT_SEATS,
             ROUTE_INFORM_NEEDS_RETRY: ROUTE_INFORM_NEEDS_RETRY,
+        },
+    )
+    # After Phase 4 resumes with the user's seat choice: chosen seats flow to Phase 5
+    # (checkout), which doesn't exist yet, so ROUTE_CHECKOUT maps to END as a placeholder.
+    # A rejection routes to the no-seats inform exit.
+    builder.add_conditional_edges(
+        ROUTE_PRESENT_SEATS,
+        route_after_phase_4,
+        {
+            ROUTE_CHECKOUT: END,
+            ROUTE_INFORM_NO_SEATS: ROUTE_INFORM_NO_SEATS,
         },
     )
     builder.add_edge(ROUTE_INFORM_MOVIE_UNAVAILABLE, END)
     builder.add_edge(ROUTE_INFORM_THEATER_UNAVAILABLE, END)
     builder.add_edge(ROUTE_INFORM_NEEDS_RETRY, END)
     builder.add_edge(ROUTE_INFORM_NO_SHOWTIME, END)
+    builder.add_edge(ROUTE_INFORM_NO_SEATS, END)
 
     return builder.compile(checkpointer=checkpointer)
 
@@ -144,7 +166,7 @@ def initial_booking_state(
         offered_showtimes=None,
         chosen_showtime=None,
         chosen_showtime_url=None,
-        seat_section=None,
+        offered_seats=None,
         chosen_seats=None,
         seat_quantity=seat_quantity,
         payment_link=None,
