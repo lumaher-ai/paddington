@@ -542,25 +542,38 @@ def build_phase_6_node(agent_loop: AgentLoop) -> PhaseNode:
 
     async def phase_6_prepare_order(state: BookingState, config: RunnableConfig) -> dict:
         seat_quantity = state["seat_quantity"]
-        logger.info("phase6_preparing_order", seat_quantity=seat_quantity)
+        thread_id = f"{config.get('configurable', {}).get('thread_id', 'default_thread_id')}:p6"
+        # Log the plan up front (how many plus-clicks we expect) and the isolated thread the
+        # inner agent runs on, so the click trace (browser_click / browser_click_failed lines
+        # from BrowserSession) can be correlated to this phase run.
+        logger.info(
+            "phase6_preparing_order",
+            seat_quantity=seat_quantity,
+            expected_plus_clicks=seat_quantity,
+            thread_id=thread_id,
+        )
 
         prompt = phase6_prepare_order_prompt(seat_quantity)
 
-        outer_thread_id = config.get("configurable", {}).get("thread_id", "default_thread_id")
         try:
             result = await agent_loop.run(
                 user_message=(
                     f"Prepare the order: add {seat_quantity} tickets and continue to payment."
                 ),
-                thread_id=f"{outer_thread_id}:p6",
+                thread_id=thread_id,
                 system_prompt=prompt,
             )
         except AgentRecursionLimitError:
             # The inner agent couldn't converge (classically: clicking the plus button
             # without ever advancing). Don't crash the booking graph — downgrade to
             # NEEDS_RETRY like Phase 5's failure posture. The AgentLoop already logged the
-            # repeated tool call that reveals the loop at limit time.
-            logger.warning("phase6_recursion_limit", seat_quantity=seat_quantity)
+            # repeated tool call (with its ref) that reveals the loop at limit time; the
+            # per-click aria-labels are in the BrowserSession browser_click* logs.
+            logger.warning(
+                "phase6_recursion_limit",
+                seat_quantity=seat_quantity,
+                thread_id=thread_id,
+            )
             return {
                 "phase_outcome": PHASE6_NEEDS_RETRY,
                 "messages": [
@@ -569,12 +582,31 @@ def build_phase_6_node(agent_loop: AgentLoop) -> PhaseNode:
             }
 
         outcome = parse_phase_status(result.answer, PHASE6_STATUSES, PHASE6_NEEDS_RETRY)
-        logger.info(
-            "phase6_completed",
-            outcome=outcome,
-            iterations=result.iterations,
-            tools_used=result.tools_used,
-        )
+        # Count how many click tool calls the agent actually made — a healthy run is roughly
+        # seat_quantity plus-clicks + "Siguiente" + "Continuar con el pago". A far-off count
+        # (e.g. only 1 click) points at a stepper/button the agent couldn't find or click,
+        # which the browser_click* logs then explain by ref + aria-label.
+        click_calls = result.tools_used.count("click")
+        if outcome == PHASE6_ORDER_PREPARED:
+            logger.info(
+                "phase6_completed",
+                outcome=outcome,
+                iterations=result.iterations,
+                click_calls=click_calls,
+                tools_used=result.tools_used,
+            )
+        else:
+            # No valid STATUS -> downgrade. Log the agent's own final report at warning level:
+            # it usually says which button/step it got stuck on, which — together with the
+            # browser_click* trace — is what makes the failure diagnosable.
+            logger.warning(
+                "phase6_no_valid_status",
+                outcome=outcome,
+                iterations=result.iterations,
+                click_calls=click_calls,
+                tools_used=result.tools_used,
+                agent_report=result.answer,
+            )
         return {
             "phase_outcome": outcome,
             "messages": [AIMessage(content=result.answer)],

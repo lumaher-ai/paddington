@@ -344,9 +344,8 @@ You must add {seat_quantity} tickets, advance, and then skip food & drinks.
 
 Add the tickets ONE CLICK AT A TIME:
 1. get_snapshot to read the current page and its fresh element refs.
-2. Find the "Increase quantity" plus button — its accessible name is "Increase quantity".
-   If several ticket categories are listed, each with its own stepper, use the FIRST
-   (topmost / general-admission) one.
+2. Find a table with title: "Seleccione sus boletas", In the column title "Cantidad" click the plus 
+icon buttom with name "Increase quantity"— its accessible name is "Increase quantity".
 3. click that button's ref exactly once. This adds one ticket.
 4. get_snapshot again — the click changed the page and regenerated every ref. Confirm the
    quantity went up by one.

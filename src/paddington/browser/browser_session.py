@@ -258,13 +258,44 @@ class BrowserSession:
         )
         return png
 
+    def _describe_ref(self, ref: str) -> tuple[str | None, str | None]:
+        """Resolve a ref's accessible name (aria-label) and role from the last snapshot.
+
+        The ``_ref_map`` only stores CSS selectors, so the human-meaningful element
+        metadata — the accessible name the LLM matched on, e.g. ``"Increase quantity"`` —
+        comes from ``last_snapshot.interactive_elements``. Used purely for logging so a
+        click trace says *what* was clicked, not just an opaque ref. Returns ``(None, None)``
+        when the ref isn't in the most recent snapshot (e.g. a stale ref).
+        """
+        snapshot = self.last_snapshot
+        if snapshot is None:
+            return None, None
+        for el in snapshot.interactive_elements:
+            if el.ref == ref:
+                return el.name, el.role
+        return None, None
+
     async def click(self, ref: str, timeout_ms: int = 30_000) -> ClickResult:
         start = time.perf_counter()
         previous_url = self.page.url
         error: str | None = None
 
+        # Resolve the element's accessible name/role from the last snapshot up front so
+        # every log line below names *what* was clicked (its aria-label), not just its ref.
+        name, role = self._describe_ref(ref)
+
         selector = self._ref_map.get(ref)
         if selector is None:
+            # The LLM asked for a ref that isn't in the current snapshot — the classic
+            # "can't find/click the reference" failure. Log it (with how many refs *are*
+            # available) so the cause is visible instead of silently returned to the model.
+            logger.warning(
+                "browser_click_unknown_ref",
+                ref=ref,
+                name=name,
+                url=previous_url,
+                known_refs=len(self._ref_map),
+            )
             return ClickResult(
                 success=False,
                 previous_url=previous_url,
@@ -291,6 +322,29 @@ class BrowserSession:
             current_url = self.page.url
 
         success = error is None and not self.page.is_closed()
+
+        # Log the outcome with the element's accessible name so a failed booking step is
+        # debuggable: which element (aria-label), whether the page moved, and why it failed.
+        if success:
+            logger.info(
+                "browser_click",
+                ref=ref,
+                name=name,
+                role=role,
+                navigated=previous_url != current_url,
+                current_url=current_url,
+                elapsed_ms=elapsed_ms,
+            )
+        else:
+            logger.warning(
+                "browser_click_failed",
+                ref=ref,
+                name=name,
+                role=role,
+                error=error,
+                url=current_url,
+                elapsed_ms=elapsed_ms,
+            )
 
         await self._capture_debug("click")
         return ClickResult(
