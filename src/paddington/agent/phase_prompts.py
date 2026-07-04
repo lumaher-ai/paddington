@@ -291,16 +291,26 @@ Once EVERY chosen seat is selected, confirm the selection:
    labelled "Seleccionar boletas" (accept "Continuar" or "Confirmar" if that exact
    label is not present). It may only appear once the required number of seats is
    selected, so if you do not see it, get_snapshot once more and look again.
-6. get_snapshot to verify the page advanced past the seat map.
+   Click it ONCE, then get_snapshot — the page may take a moment to advance, so do
+   not immediately click it again just because the URL hasn't changed yet.
+6. get_snapshot and read the page URL. The seat map's URL ends in "/seats". The
+   moment the URL no longer ends in "/seats" (for example it now ends in "/tickets"),
+   you have SUCCEEDED — STOP IMMEDIATELY and report SEATS_SELECTED.
+
+CRITICAL — the instant the page leaves the seat map, your job is DONE. Do NOT click
+"Siguiente", do NOT change ticket quantities, and do NOT click ANY button on the
+ticket/quantity page that follows — that is a later step's job, not yours. Clicking
+anything there is an error.
 
 If a chosen seat is missing or reads "no disponible", do not substitute another
 seat — report that you could not select it. Do NOT log in or enter any payment
-details; your job ends once you have clicked "Seleccionar boletas"."""
+details; your job ends the moment the page advances past the seat map."""
 
 _PHASE5_ENDS_WHEN = (
-    'every chosen seat is selected and you have clicked "Seleccionar boletas" '
-    '("Continuar"/"Confirmar") to advance past the seat map (or a chosen seat is '
-    "unavailable and cannot be selected)"
+    'every chosen seat is selected, you have clicked "Seleccionar boletas" '
+    '("Continuar"/"Confirmar"), and the page has left the seat map (its URL no longer '
+    'ends in "/seats") — stop there and click nothing on the next page (or a chosen '
+    "seat is unavailable and cannot be selected)"
 )
 
 
