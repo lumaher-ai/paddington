@@ -33,10 +33,14 @@ from paddington.agent.phase_prompts import (
     PHASE5_NEEDS_RETRY,
     PHASE5_SEATS_SELECTED,
     PHASE5_STATUSES,
+    PHASE6_NEEDS_RETRY,
+    PHASE6_ORDER_PREPARED,
+    PHASE6_STATUSES,
     parse_phase_status,
     phase1_find_showtimes_prompt,
     phase3_get_to_seats_prompt,
     phase5_select_seats_prompt,
+    phase6_prepare_order_prompt,
 )
 from paddington.agent.seat_extraction import offered_seats, parse_seat_map
 from paddington.agent.showtime_extraction import (
@@ -82,9 +86,13 @@ ROUTE_PRESENT_SEATS = "present_seats"
 ROUTE_SELECT_SEATS = "select_seats"  # Phase 5 node
 ROUTE_INFORM_NO_SEATS = "inform_no_seats"
 
-# Route name returned by route_after_phase_5. ROUTE_CHECKOUT is Phase 6 (payment); it maps
-# to END as a placeholder until that slice lands.
+# Route name returned by route_after_phase_5. ROUTE_CHECKOUT is the Phase 6 node (prepare
+# the order for payment).
 ROUTE_CHECKOUT = "checkout"
+
+# Route name returned by route_after_phase_6. ROUTE_FILL_FORM is Phase 7 (form fill from
+# .env); it maps to END as a placeholder until that slice lands.
+ROUTE_FILL_FORM = "fill_form"
 
 
 def build_phase_1_node(
@@ -510,9 +518,77 @@ def build_phase_5_node(agent_loop: AgentLoop) -> PhaseNode:
 def route_after_phase_5(state: BookingState) -> str:
     """Map Phase 5's outcome to the next node name (the conditional edge)."""
     if state["phase_outcome"] == PHASE5_SEATS_SELECTED:
-        # -> Phase 6 (checkout/payment); placeholder END until that slice lands.
+        # -> Phase 6 (prepare the order for payment).
         return ROUTE_CHECKOUT
     # No valid status (couldn't select the seats) -> the generic retry inform exit.
+    return ROUTE_INFORM_NEEDS_RETRY
+
+
+def build_phase_6_node(agent_loop: AgentLoop) -> PhaseNode:
+    """Build the Phase 6 node — drive the inner agent to prepare the order for payment.
+
+    Same lightweight shape as Phase 5: the ticket-quantity page is already open (Phase 5
+    clicked "Seleccionar boletas" and the site redirected /seats -> /tickets; the
+    ``BrowserSession`` persists across phases), and there is nothing to parse afterwards —
+    the LLM does the clicking. So the node needs only the ``AgentLoop``, not the session.
+
+    The agent adds ``seat_quantity`` tickets via the first "Increase quantity" stepper,
+    clicks "Siguiente", then clicks "Continuar con el pago" without selecting any food or
+    drink — landing on the payment/form page (Phase 7's start). Runs on an isolated ``:p6``
+    thread, parses the STATUS token, and writes the outcome. A failure to prepare the order
+    (a stepper or continue button that never appears) yields no valid status and downgrades
+    to ``NEEDS_RETRY``.
+    """
+
+    async def phase_6_prepare_order(state: BookingState, config: RunnableConfig) -> dict:
+        seat_quantity = state["seat_quantity"]
+        logger.info("phase6_preparing_order", seat_quantity=seat_quantity)
+
+        prompt = phase6_prepare_order_prompt(seat_quantity)
+
+        outer_thread_id = config.get("configurable", {}).get("thread_id", "default_thread_id")
+        try:
+            result = await agent_loop.run(
+                user_message=(
+                    f"Prepare the order: add {seat_quantity} tickets and continue to payment."
+                ),
+                thread_id=f"{outer_thread_id}:p6",
+                system_prompt=prompt,
+            )
+        except AgentRecursionLimitError:
+            # The inner agent couldn't converge (classically: clicking the plus button
+            # without ever advancing). Don't crash the booking graph — downgrade to
+            # NEEDS_RETRY like Phase 5's failure posture. The AgentLoop already logged the
+            # repeated tool call that reveals the loop at limit time.
+            logger.warning("phase6_recursion_limit", seat_quantity=seat_quantity)
+            return {
+                "phase_outcome": PHASE6_NEEDS_RETRY,
+                "messages": [
+                    AIMessage(content="I couldn't finish preparing the order. Please try again.")
+                ],
+            }
+
+        outcome = parse_phase_status(result.answer, PHASE6_STATUSES, PHASE6_NEEDS_RETRY)
+        logger.info(
+            "phase6_completed",
+            outcome=outcome,
+            iterations=result.iterations,
+            tools_used=result.tools_used,
+        )
+        return {
+            "phase_outcome": outcome,
+            "messages": [AIMessage(content=result.answer)],
+        }
+
+    return phase_6_prepare_order
+
+
+def route_after_phase_6(state: BookingState) -> str:
+    """Map Phase 6's outcome to the next node name (the conditional edge)."""
+    if state["phase_outcome"] == PHASE6_ORDER_PREPARED:
+        # -> Phase 7 (form fill from .env); placeholder END until that slice lands.
+        return ROUTE_FILL_FORM
+    # No valid status (couldn't prepare the order) -> the generic retry inform exit.
     return ROUTE_INFORM_NEEDS_RETRY
 
 

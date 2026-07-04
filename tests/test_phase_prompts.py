@@ -14,6 +14,7 @@ from paddington.agent.phase_prompts import (
     parse_phase_status,
     phase1_find_showtimes_prompt,
     phase5_select_seats_prompt,
+    phase6_prepare_order_prompt,
 )
 
 
@@ -63,6 +64,21 @@ def test_phase5_prompt_lists_chosen_seats_as_accessible_names() -> None:
     assert "Stop and report your findings as soon as" in prompt
     # Only the happy outcome token is advertised in the STATUS instruction.
     assert "SEATS_SELECTED" in prompt
+
+
+def test_phase6_prompt_describes_ticket_quantity_and_checkout_buttons() -> None:
+    prompt = phase6_prepare_order_prompt(2)
+    assert BROWSER_BASE_PROMPT in prompt
+    # The seat_quantity is interpolated as the number of times to click the plus stepper.
+    assert "2 tickets" in prompt
+    # The plus stepper is matched by its accessible name.
+    assert '"Increase quantity"' in prompt
+    # Advance past the ticket page, then past food & drinks without adding anything.
+    assert "Siguiente" in prompt
+    assert "Continuar con el pago" in prompt
+    assert "Stop and report your findings as soon as" in prompt
+    # Only the happy outcome token is advertised in the STATUS instruction.
+    assert "ORDER_PREPARED" in prompt
 
 
 def test_resolve_system_prompt_returns_per_phase_when_set() -> None:
