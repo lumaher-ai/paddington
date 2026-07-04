@@ -39,6 +39,11 @@ class InteractiveElement(BaseModel):
         description="Absolute URL for link elements; None for non-links. Read by code "
         "(e.g. to capture a showtime's seat-selection URL), not for the LLM to transcribe.",
     )
+    disabled: bool = Field(
+        default=False,
+        description="True when the element is disabled/inert (native `disabled` or "
+        "aria-disabled). Clicking it does nothing — don't retry it; pick another action.",
+    )
 
 
 class PageSnapshot(BaseModel):

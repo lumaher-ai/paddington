@@ -291,16 +291,26 @@ Once EVERY chosen seat is selected, confirm the selection:
    labelled "Seleccionar boletas" (accept "Continuar" or "Confirmar" if that exact
    label is not present). It may only appear once the required number of seats is
    selected, so if you do not see it, get_snapshot once more and look again.
-6. get_snapshot to verify the page advanced past the seat map.
+   Click it ONCE, then get_snapshot — the page may take a moment to advance, so do
+   not immediately click it again just because the URL hasn't changed yet.
+6. get_snapshot and read the page URL. The seat map's URL ends in "/seats". The
+   moment the URL no longer ends in "/seats" (for example it now ends in "/tickets"),
+   you have SUCCEEDED — STOP IMMEDIATELY and report SEATS_SELECTED.
+
+CRITICAL — the instant the page leaves the seat map, your job is DONE. Do NOT click
+"Siguiente", do NOT change ticket quantities, and do NOT click ANY button on the
+ticket/quantity page that follows — that is a later step's job, not yours. Clicking
+anything there is an error.
 
 If a chosen seat is missing or reads "no disponible", do not substitute another
 seat — report that you could not select it. Do NOT log in or enter any payment
-details; your job ends once you have clicked "Seleccionar boletas"."""
+details; your job ends the moment the page advances past the seat map."""
 
 _PHASE5_ENDS_WHEN = (
-    'every chosen seat is selected and you have clicked "Seleccionar boletas" '
-    '("Continuar"/"Confirmar") to advance past the seat map (or a chosen seat is '
-    "unavailable and cannot be selected)"
+    'every chosen seat is selected, you have clicked "Seleccionar boletas" '
+    '("Continuar"/"Confirmar"), and the page has left the seat map (its URL no longer '
+    'ends in "/seats") — stop there and click nothing on the next page (or a chosen '
+    "seat is unavailable and cannot be selected)"
 )
 
 
@@ -317,4 +327,95 @@ def phase5_select_seats_prompt(chosen_seats: list[str]) -> str:
         goal=_PHASE5_GOAL.format(named_seats=named_seats),
         ends_when=_PHASE5_ENDS_WHEN,
         statuses=PHASE5_STATUSES,
+    )
+
+
+# --- Phase 6: prepare the order for payment ----------------------------------
+# After Phase 5 clicks "Seleccionar boletas" the site redirects from the seat map (/seats)
+# to the ticket-quantity page (/tickets). Phase 6 adds the tickets, advances past the
+# food & drinks step, and lands the agent on the payment/form page (Phase 7's start). Like
+# Phase 5 the LLM does all the clicking and there is nothing to parse afterwards.
+
+# Phase 6 outcomes. Like Phase 5, only the happy token is advertised in the STATUS
+# instruction; NEEDS_RETRY is the parser fallback when the agent can't prepare the order
+# (e.g. the quantity stepper or a continue button never appears).
+PHASE6_ORDER_PREPARED = "ORDER_PREPARED"
+PHASE6_NEEDS_RETRY = "NEEDS_RETRY"  # fallback / no valid status
+
+PHASE6_STATUSES = {
+    PHASE6_ORDER_PREPARED,
+}
+
+_PHASE6_GOAL = """\
+Prepare the order for payment. The ticket-quantity page is already open from the previous
+step (Phase 5 clicked "Seleccionar boletas" and the site advanced to the /tickets page).
+
+Do these three parts strictly in order: (A) set the ticket quantity to {seat_quantity},
+then (B) click "Siguiente", then (C) skip food & drinks with "Continuar con el pago".
+
+## Part A — set the ticket quantity to {seat_quantity}
+
+Drive this by the number the page SHOWS, not by counting your own clicks.
+1. get_snapshot to read the current page and its fresh element refs.
+2. In the table titled "Seleccione sus boletas", read the number shown in the "Cantidad"
+   column — that is the CURRENT ticket quantity (it starts at 0).
+3. Decide based on that displayed number:
+   - If the displayed quantity is already {seat_quantity} (or more): STOP. Do not click the
+     plus button again. Go straight to Part B.
+   - If the displayed quantity is less than {seat_quantity}: click the "Increase quantity"
+     plus button ONCE (its accessible name is "Increase quantity"). This adds one ticket.
+4. get_snapshot again — the click regenerated every ref and updated the "Cantidad" number.
+5. Go back to step 2 and re-read the displayed quantity.
+
+The plus button's ref changes after every snapshot, but it is the SAME button and each click
+adds one more ticket. The displayed "Cantidad" number is the SOURCE OF TRUTH — never rely on
+how many times you think you have clicked. Once "Cantidad" reads {seat_quantity}, you are done
+adding tickets: NEVER click the plus button again for any reason. NEVER guess a ref — only use
+refs from the most recent snapshot.
+
+STOP SIGNAL: the "Increase quantity" button becomes DISABLED once the quantity reaches its
+maximum ({seat_quantity}). If the snapshot shows that button as disabled, OR a click on it
+returns that it is disabled, the quantity is already at the maximum — do NOT click it again.
+Move straight to Part B.
+
+## Part B — advance with "Siguiente"
+
+Once "Cantidad" reads {seat_quantity}, your next action is to click "Siguiente". Do NOT click
+the plus button again.
+6. The "Siguiente" button is the PRIMARY navigation button at the BOTTOM-RIGHT of the page.
+   It has NO aria-label — its visible label text "Siguiente" sits in a span inside the button
+   (next to a right-chevron icon), so in the snapshot it appears as a button whose accessible
+   name is "Siguiente". Find the interactive element that is a button named "Siguiente" and
+   click its ref.
+7. If you do not see a "Siguiente" button in the snapshot, get_snapshot once more (it may only
+   render once the quantity is set) and look again before giving up.
+8. get_snapshot to verify the page advanced — a food-and-drinks page is now shown.
+
+## Part C — skip food & drinks
+
+On the food-and-drinks page, do NOT add any food or drink:
+9. Find and click the button labelled "Continuar con el pago" to advance to the payment step.
+10. get_snapshot to verify the page advanced past food & drinks.
+
+Do NOT log in or enter any payment details; your job ends once you have clicked
+"Continuar con el pago" and the page has advanced to the payment step."""
+
+_PHASE6_ENDS_WHEN = (
+    'you have added {seat_quantity} tickets, clicked "Siguiente", and clicked '
+    '"Continuar con el pago" to reach the payment step'
+)
+
+
+def phase6_prepare_order_prompt(seat_quantity: int) -> str:
+    """System prompt for Phase 6 — add the tickets, then advance past food & drinks.
+
+    ``seat_quantity`` is the number of tickets to add (the same count the user booked
+    seats for; default 2). The agent clicks the first "Increase quantity" stepper that
+    many times, clicks "Siguiente", then clicks "Continuar con el pago" without selecting
+    any food or drink — leaving it on the payment/form page for Phase 7.
+    """
+    return build_phase_prompt(
+        goal=_PHASE6_GOAL.format(seat_quantity=seat_quantity),
+        ends_when=_PHASE6_ENDS_WHEN.format(seat_quantity=seat_quantity),
+        statuses=PHASE6_STATUSES,
     )

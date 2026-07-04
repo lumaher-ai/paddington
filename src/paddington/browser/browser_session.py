@@ -76,7 +76,11 @@ _COLLECT_INTERACTIVE_JS = """
       || ''
     ).trim().replace(/\\s+/g, ' ').slice(0, 200);
     const href = el.tagName === 'A' ? el.href : null;
-    return { ref, role, name, href };
+    // Disabled/inert controls: native `disabled` (button/input/...) or aria-disabled.
+    // Surfaced so the agent doesn't keep clicking a maxed/greyed control (e.g. a "+"
+    // quantity stepper at its cap) and so click() can fail fast instead of blocking.
+    const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true';
+    return { ref, role, name, href, disabled };
   });
 }
 """
@@ -258,13 +262,44 @@ class BrowserSession:
         )
         return png
 
+    def _describe_ref(self, ref: str) -> tuple[str | None, str | None]:
+        """Resolve a ref's accessible name (aria-label) and role from the last snapshot.
+
+        The ``_ref_map`` only stores CSS selectors, so the human-meaningful element
+        metadata — the accessible name the LLM matched on, e.g. ``"Increase quantity"`` —
+        comes from ``last_snapshot.interactive_elements``. Used purely for logging so a
+        click trace says *what* was clicked, not just an opaque ref. Returns ``(None, None)``
+        when the ref isn't in the most recent snapshot (e.g. a stale ref).
+        """
+        snapshot = self.last_snapshot
+        if snapshot is None:
+            return None, None
+        for el in snapshot.interactive_elements:
+            if el.ref == ref:
+                return el.name, el.role
+        return None, None
+
     async def click(self, ref: str, timeout_ms: int = 30_000) -> ClickResult:
         start = time.perf_counter()
         previous_url = self.page.url
         error: str | None = None
 
+        # Resolve the element's accessible name/role from the last snapshot up front so
+        # every log line below names *what* was clicked (its aria-label), not just its ref.
+        name, role = self._describe_ref(ref)
+
         selector = self._ref_map.get(ref)
         if selector is None:
+            # The LLM asked for a ref that isn't in the current snapshot — the classic
+            # "can't find/click the reference" failure. Log it (with how many refs *are*
+            # available) so the cause is visible instead of silently returned to the model.
+            logger.warning(
+                "browser_click_unknown_ref",
+                ref=ref,
+                name=name,
+                url=previous_url,
+                known_refs=len(self._ref_map),
+            )
             return ClickResult(
                 success=False,
                 previous_url=previous_url,
@@ -274,8 +309,41 @@ class BrowserSession:
                 error=(f"unknown ref {ref!r}. Call get_snapshot() to refresh available refs."),
             )
 
+        locator = self.page.locator(selector)
+
+        # Fast-fail on inert elements. A disabled control never becomes actionable, so a plain
+        # click() would block for the FULL timeout (30s) and the agent would retry it in a loop
+        # (the Phase 6 "+" stepper at its max quantity did exactly this). Probe the enabled
+        # state cheaply first — is_enabled() honours native `disabled` and `aria-disabled` — and
+        # return immediately with an informative error instead of hanging.
         try:
-            await self.page.locator(selector).click(timeout=timeout_ms)
+            enabled = await locator.is_enabled(timeout=2_000)
+        except PlaywrightError:
+            enabled = True  # couldn't determine (detached/late render) — fall through to click
+        if not enabled:
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            logger.warning(
+                "browser_click_disabled",
+                ref=ref,
+                name=name,
+                role=role,
+                url=previous_url,
+                elapsed_ms=elapsed_ms,
+            )
+            return ClickResult(
+                success=False,
+                previous_url=previous_url,
+                current_url=previous_url,
+                navigated=False,
+                elapsed_ms=elapsed_ms,
+                error=(
+                    f"element {ref!r} ({name!r}) is disabled and cannot be clicked — it may have "
+                    "reached its limit or be inactive. Do NOT retry it; choose another action."
+                ),
+            )
+
+        try:
+            await locator.click(timeout=timeout_ms)
         except PlaywrightTimeoutError:
             error = f"click timed out after {timeout_ms}ms"
         except PlaywrightError as e:
@@ -291,6 +359,29 @@ class BrowserSession:
             current_url = self.page.url
 
         success = error is None and not self.page.is_closed()
+
+        # Log the outcome with the element's accessible name so a failed booking step is
+        # debuggable: which element (aria-label), whether the page moved, and why it failed.
+        if success:
+            logger.info(
+                "browser_click",
+                ref=ref,
+                name=name,
+                role=role,
+                navigated=previous_url != current_url,
+                current_url=current_url,
+                elapsed_ms=elapsed_ms,
+            )
+        else:
+            logger.warning(
+                "browser_click_failed",
+                ref=ref,
+                name=name,
+                role=role,
+                error=error,
+                url=current_url,
+                elapsed_ms=elapsed_ms,
+            )
 
         await self._capture_debug("click")
         return ClickResult(
@@ -325,6 +416,21 @@ class BrowserSession:
             )
 
         locator = self.page.locator(selector)
+
+        # Same fast-fail as click(): a disabled field never becomes fillable, so bail out with
+        # a clear error rather than blocking for the full timeout.
+        try:
+            enabled = await locator.is_enabled(timeout=2_000)
+        except PlaywrightError:
+            enabled = True
+        if not enabled:
+            return InputResult(
+                success=False,
+                ref=ref,
+                value_set="",
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                error=f"element {ref!r} is disabled and cannot be typed into.",
+            )
 
         try:
             if clear_first:

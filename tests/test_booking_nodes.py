@@ -8,6 +8,7 @@ from paddington.agent.agent_loop import AgentResult
 from paddington.agent.booking_graph import initial_booking_state
 from paddington.agent.booking_nodes import (
     ROUTE_CHECKOUT,
+    ROUTE_FILL_FORM,
     ROUTE_INFORM_MOVIE_UNAVAILABLE,
     ROUTE_INFORM_NEEDS_RETRY,
     ROUTE_INFORM_NO_SEATS,
@@ -19,10 +20,12 @@ from paddington.agent.booking_nodes import (
     build_phase_3_node,
     build_phase_4_node,
     build_phase_5_node,
+    build_phase_6_node,
     route_after_phase_1,
     route_after_phase_3,
     route_after_phase_4,
     route_after_phase_5,
+    route_after_phase_6,
 )
 from paddington.agent.booking_state import BookingState
 from paddington.agent.showtime_extraction import ExtractedShowtime, ShowtimeList
@@ -456,3 +459,60 @@ async def test_phase_5_recursion_limit_downgrades_to_needs_retry() -> None:
 )
 def test_route_after_phase_5(outcome: str | None, expected_route: str) -> None:
     assert route_after_phase_5({"phase_outcome": outcome}) == expected_route
+
+
+# --- Phase 6: prepare the order for payment ----------------------------------
+
+
+def _phase6_state(seat_quantity: int = 2) -> dict:
+    return {"seat_quantity": seat_quantity}
+
+
+async def test_phase_6_prepares_order_and_reports_ready() -> None:
+    fake = _FakeAgentLoop("Added the tickets and continued to payment.\nSTATUS: ORDER_PREPARED")
+    node = build_phase_6_node(fake)
+
+    update = await node(_phase6_state(), _config("user-1:thread-9"))
+
+    assert update["phase_outcome"] == "ORDER_PREPARED"
+    assert len(update["messages"]) == 1
+    assert isinstance(update["messages"][0], AIMessage)
+    # Runs on its own per-phase thread; the prompt carries the ticket count.
+    call = fake.calls[0]
+    assert call["thread_id"] == "user-1:thread-9:p6"
+    assert "2 tickets" in call["system_prompt"]
+
+
+async def test_phase_6_missing_status_downgrades_to_needs_retry() -> None:
+    fake = _FakeAgentLoop("I clicked around but never reached the payment step.")
+    node = build_phase_6_node(fake)
+
+    update = await node(_phase6_state(), _config())
+
+    assert update["phase_outcome"] == "NEEDS_RETRY"
+
+
+async def test_phase_6_recursion_limit_downgrades_to_needs_retry() -> None:
+    # An agent that keeps clicking the plus button without advancing hits the recursion
+    # limit; the node must not crash the graph — it downgrades to NEEDS_RETRY (like Phase 5).
+    from paddington.agent.agent_loop import AgentRecursionLimitError
+
+    fake = _FakeAgentLoop("", raises=AgentRecursionLimitError("step limit"))
+    node = build_phase_6_node(fake)
+
+    update = await node(_phase6_state(), _config())
+
+    assert update["phase_outcome"] == "NEEDS_RETRY"
+    assert isinstance(update["messages"][0], AIMessage)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_route"),
+    [
+        ("ORDER_PREPARED", ROUTE_FILL_FORM),
+        ("NEEDS_RETRY", ROUTE_INFORM_NEEDS_RETRY),
+        (None, ROUTE_INFORM_NEEDS_RETRY),
+    ],
+)
+def test_route_after_phase_6(outcome: str | None, expected_route: str) -> None:
+    assert route_after_phase_6({"phase_outcome": outcome}) == expected_route
