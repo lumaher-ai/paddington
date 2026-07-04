@@ -73,6 +73,9 @@ def test_phase6_prompt_describes_ticket_quantity_and_checkout_buttons() -> None:
     assert "2 tickets" in prompt
     # The plus stepper is matched by its accessible name.
     assert '"Increase quantity"' in prompt
+    # The stop condition is the displayed "Cantidad" number, not a self-counted click tally —
+    # this is what stops the agent over-clicking the plus button.
+    assert "Cantidad" in prompt
     # Advance past the ticket page, then past food & drinks without adding anything.
     assert "Siguiente" in prompt
     assert "Continuar con el pago" in prompt

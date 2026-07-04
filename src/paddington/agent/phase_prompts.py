@@ -340,26 +340,47 @@ _PHASE6_GOAL = """\
 Prepare the order for payment. The ticket-quantity page is already open from the previous
 step (Phase 5 clicked "Seleccionar boletas" and the site advanced to the /tickets page).
 
-You must add {seat_quantity} tickets, advance, and then skip food & drinks.
+Do these three parts strictly in order: (A) set the ticket quantity to {seat_quantity},
+then (B) click "Siguiente", then (C) skip food & drinks with "Continuar con el pago".
 
-Add the tickets ONE CLICK AT A TIME:
+## Part A — set the ticket quantity to {seat_quantity}
+
+Drive this by the number the page SHOWS, not by counting your own clicks.
 1. get_snapshot to read the current page and its fresh element refs.
-2. Find a table with title: "Seleccione sus boletas", In the column title "Cantidad" click the plus 
-icon buttom with name "Increase quantity"— its accessible name is "Increase quantity".
-3. click that button's ref exactly once. This adds one ticket.
-4. get_snapshot again — the click changed the page and regenerated every ref. Confirm the
-   quantity went up by one.
-Repeat steps 2-4 until you have clicked the plus button EXACTLY {seat_quantity} times, so
-the ticket quantity reads {seat_quantity}. NEVER guess a ref — only use refs from the most
-recent snapshot. Do not over-click past {seat_quantity}.
+2. In the table titled "Seleccione sus boletas", read the number shown in the "Cantidad"
+   column — that is the CURRENT ticket quantity (it starts at 0).
+3. Decide based on that displayed number:
+   - If the displayed quantity is already {seat_quantity} (or more): STOP. Do not click the
+     plus button again. Go straight to Part B.
+   - If the displayed quantity is less than {seat_quantity}: click the "Increase quantity"
+     plus button ONCE (its accessible name is "Increase quantity"). This adds one ticket.
+4. get_snapshot again — the click regenerated every ref and updated the "Cantidad" number.
+5. Go back to step 2 and re-read the displayed quantity.
 
-Once the quantity is {seat_quantity}, advance:
-5. Find and click the button labelled "Siguiente" to continue to the next step.
-6. get_snapshot to verify the page advanced — a food-and-drinks page is now shown.
+The plus button's ref changes after every snapshot, but it is the SAME button and each click
+adds one more ticket. The displayed "Cantidad" number is the SOURCE OF TRUTH — never rely on
+how many times you think you have clicked. Once "Cantidad" reads {seat_quantity}, you are done
+adding tickets: NEVER click the plus button again for any reason. NEVER guess a ref — only use
+refs from the most recent snapshot.
+
+## Part B — advance with "Siguiente"
+
+Once "Cantidad" reads {seat_quantity}, your next action is to click "Siguiente". Do NOT click
+the plus button again.
+6. The "Siguiente" button is the PRIMARY navigation button at the BOTTOM-RIGHT of the page.
+   It has NO aria-label — its visible label text "Siguiente" sits in a span inside the button
+   (next to a right-chevron icon), so in the snapshot it appears as a button whose accessible
+   name is "Siguiente". Find the interactive element that is a button named "Siguiente" and
+   click its ref.
+7. If you do not see a "Siguiente" button in the snapshot, get_snapshot once more (it may only
+   render once the quantity is set) and look again before giving up.
+8. get_snapshot to verify the page advanced — a food-and-drinks page is now shown.
+
+## Part C — skip food & drinks
 
 On the food-and-drinks page, do NOT add any food or drink:
-7. Find and click the button labelled "Continuar con el pago" to advance to the payment step.
-8. get_snapshot to verify the page advanced past food & drinks.
+9. Find and click the button labelled "Continuar con el pago" to advance to the payment step.
+10. get_snapshot to verify the page advanced past food & drinks.
 
 Do NOT log in or enter any payment details; your job ends once you have clicked
 "Continuar con el pago" and the page has advanced to the payment step."""
