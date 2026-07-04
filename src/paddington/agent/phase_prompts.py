@@ -363,6 +363,11 @@ how many times you think you have clicked. Once "Cantidad" reads {seat_quantity}
 adding tickets: NEVER click the plus button again for any reason. NEVER guess a ref — only use
 refs from the most recent snapshot.
 
+STOP SIGNAL: the "Increase quantity" button becomes DISABLED once the quantity reaches its
+maximum ({seat_quantity}). If the snapshot shows that button as disabled, OR a click on it
+returns that it is disabled, the quantity is already at the maximum — do NOT click it again.
+Move straight to Part B.
+
 ## Part B — advance with "Siguiente"
 
 Once "Cantidad" reads {seat_quantity}, your next action is to click "Siguiente". Do NOT click

@@ -76,7 +76,11 @@ _COLLECT_INTERACTIVE_JS = """
       || ''
     ).trim().replace(/\\s+/g, ' ').slice(0, 200);
     const href = el.tagName === 'A' ? el.href : null;
-    return { ref, role, name, href };
+    // Disabled/inert controls: native `disabled` (button/input/...) or aria-disabled.
+    // Surfaced so the agent doesn't keep clicking a maxed/greyed control (e.g. a "+"
+    // quantity stepper at its cap) and so click() can fail fast instead of blocking.
+    const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true';
+    return { ref, role, name, href, disabled };
   });
 }
 """
@@ -305,8 +309,41 @@ class BrowserSession:
                 error=(f"unknown ref {ref!r}. Call get_snapshot() to refresh available refs."),
             )
 
+        locator = self.page.locator(selector)
+
+        # Fast-fail on inert elements. A disabled control never becomes actionable, so a plain
+        # click() would block for the FULL timeout (30s) and the agent would retry it in a loop
+        # (the Phase 6 "+" stepper at its max quantity did exactly this). Probe the enabled
+        # state cheaply first — is_enabled() honours native `disabled` and `aria-disabled` — and
+        # return immediately with an informative error instead of hanging.
         try:
-            await self.page.locator(selector).click(timeout=timeout_ms)
+            enabled = await locator.is_enabled(timeout=2_000)
+        except PlaywrightError:
+            enabled = True  # couldn't determine (detached/late render) — fall through to click
+        if not enabled:
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            logger.warning(
+                "browser_click_disabled",
+                ref=ref,
+                name=name,
+                role=role,
+                url=previous_url,
+                elapsed_ms=elapsed_ms,
+            )
+            return ClickResult(
+                success=False,
+                previous_url=previous_url,
+                current_url=previous_url,
+                navigated=False,
+                elapsed_ms=elapsed_ms,
+                error=(
+                    f"element {ref!r} ({name!r}) is disabled and cannot be clicked — it may have "
+                    "reached its limit or be inactive. Do NOT retry it; choose another action."
+                ),
+            )
+
+        try:
+            await locator.click(timeout=timeout_ms)
         except PlaywrightTimeoutError:
             error = f"click timed out after {timeout_ms}ms"
         except PlaywrightError as e:
@@ -379,6 +416,21 @@ class BrowserSession:
             )
 
         locator = self.page.locator(selector)
+
+        # Same fast-fail as click(): a disabled field never becomes fillable, so bail out with
+        # a clear error rather than blocking for the full timeout.
+        try:
+            enabled = await locator.is_enabled(timeout=2_000)
+        except PlaywrightError:
+            enabled = True
+        if not enabled:
+            return InputResult(
+                success=False,
+                ref=ref,
+                value_set="",
+                elapsed_ms=int((time.perf_counter() - start) * 1000),
+                error=f"element {ref!r} is disabled and cannot be typed into.",
+            )
 
         try:
             if clear_first:
