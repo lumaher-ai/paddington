@@ -95,3 +95,27 @@ class InputResult(BaseModel):
         default=None,
         description="Error message if success=False.",
     )
+
+
+class FillCheckoutFormResult(BaseModel):
+    # PII contract: this result is serialized into a ToolMessage, so it must NEVER
+    # echo the filled values (name, email, document). Refs + status only.
+    success: bool = Field(
+        description="True when every mapped field was filled without error.",
+    )
+    filled_refs: list[str] = Field(
+        default_factory=list,
+        description="Refs successfully filled.",
+    )
+    failed_refs: dict[str, str] = Field(
+        default_factory=dict,
+        description="Ref -> error message for fields that could not be filled. No PII.",
+    )
+    elapsed_ms: int = Field(
+        ge=0,
+        description="Duration of the whole fill in milliseconds.",
+    )
+    error: str | None = Field(
+        default=None,
+        description="Overall error if the fill aborted early.",
+    )

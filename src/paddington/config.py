@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default="", description="OpenAI API key")
     anthropic_api_key: str = Field(default="", description="Anthropic API key")
 
+    # Booking PII (read internally by fill_checkout_form; never passed as tool params)
+    booking_full_name: str = Field(default="", description="First/given name for checkout")
+    booking_last_name: str = Field(default="", description="Last/family name for checkout")
+    booking_email: str = Field(default="", description="Email for checkout")
+    booking_dni: str = Field(default="", description="Document / cédula for checkout")
+
     # LLM for LiteLLM
     default_model: str = Field(
         default="gpt-4o-mini",
