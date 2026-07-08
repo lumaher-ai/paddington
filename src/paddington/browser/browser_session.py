@@ -111,7 +111,8 @@ class BrowserSession:
         Calls page.screenshot directly (not self.screenshot) to avoid the
         per-call info log and any chance of recursion.
         """
-        if self.recorder is None:
+        # recorder disabled (None) or turned off mid-run by a PII phase -> capture nothing.
+        if self.recorder is None or not self.recorder.enabled:
             return
         try:
             png = await self.page.screenshot(full_page=False, type="png")

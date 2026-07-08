@@ -36,11 +36,15 @@ from paddington.agent.phase_prompts import (
     PHASE6_NEEDS_RETRY,
     PHASE6_ORDER_PREPARED,
     PHASE6_STATUSES,
+    PHASE7_NEEDS_RETRY,
+    PHASE7_PAYMENT_READY,
+    PHASE7_STATUSES,
     parse_phase_status,
     phase1_find_showtimes_prompt,
     phase3_get_to_seats_prompt,
     phase5_select_seats_prompt,
     phase6_prepare_order_prompt,
+    phase7_fill_and_pay_prompt,
 )
 from paddington.agent.seat_extraction import offered_seats, parse_seat_map
 from paddington.agent.showtime_extraction import (
@@ -90,9 +94,13 @@ ROUTE_INFORM_NO_SEATS = "inform_no_seats"
 # the order for payment).
 ROUTE_CHECKOUT = "checkout"
 
-# Route name returned by route_after_phase_6. ROUTE_FILL_FORM is Phase 7 (form fill from
-# .env); it maps to END as a placeholder until that slice lands.
+# Route name returned by route_after_phase_6. ROUTE_FILL_FORM is the Phase 7 node (fill the
+# checkout form from .env / settings, then click "Pago").
 ROUTE_FILL_FORM = "fill_form"
+
+# Route name returned by route_after_phase_7 on success. Phase 7 is the final move, so this
+# maps straight to END — the node has already emitted the payment link as the last message.
+ROUTE_PAYMENT_SHARED = "payment_shared"
 
 
 def build_phase_1_node(
@@ -618,9 +626,105 @@ def build_phase_6_node(agent_loop: AgentLoop) -> PhaseNode:
 def route_after_phase_6(state: BookingState) -> str:
     """Map Phase 6's outcome to the next node name (the conditional edge)."""
     if state["phase_outcome"] == PHASE6_ORDER_PREPARED:
-        # -> Phase 7 (form fill from .env); placeholder END until that slice lands.
+        # -> Phase 7 (fill the checkout form, then click "Pago").
         return ROUTE_FILL_FORM
     # No valid status (couldn't prepare the order) -> the generic retry inform exit.
+    return ROUTE_INFORM_NEEDS_RETRY
+
+
+def build_phase_7_node(agent_loop: AgentLoop, session: BrowserSession) -> PhaseNode:
+    """Build the Phase 7 node — fill the checkout form, click "Pago", share the payment link.
+
+    The final phase. Phase 6 left the browser on the payment/form page. The agent identifies
+    which form field is which and fills them all in ONE ``fill_checkout_form`` call (values come
+    from settings — the LLM never sees or types the PII), then clicks the "Pago" button to reach
+    the payment page. Unlike Phase 5/6 this node takes the ``session`` (like Phase 1/3) for two
+    reasons: it disables debug screenshotting for this PII phase, and it reads the redirect URL
+    (the payment link) code-side rather than trusting the LLM to transcribe it — the same
+    "code owns URLs" discipline Phase 1 uses for ``chosen_showtime_url``.
+
+    On success it writes ``payment_link`` and emits a final, code-built message containing that
+    URL. A failure to fill the form or reach payment yields no valid status and downgrades to
+    ``NEEDS_RETRY``.
+    """
+
+    async def phase_7_fill_and_pay(state: BookingState, config: RunnableConfig) -> dict:
+        # PII phase: stop writing debug screenshots. The filled form (and every snapshot/click
+        # after it) shows the user's name/email/cédula; fill_checkout_form already skips its own
+        # capture, but the surrounding get_snapshot/click calls would still screenshot it.
+        if session.recorder:
+            session.recorder.enabled = False
+
+        thread_id = f"{config.get('configurable', {}).get('thread_id', 'default_thread_id')}:p7"
+        logger.info("phase7_filling_form", thread_id=thread_id)
+
+        prompt = phase7_fill_and_pay_prompt()
+
+        try:
+            result = await agent_loop.run(
+                user_message="Fill the checkout form and continue to payment.",
+                thread_id=thread_id,
+                system_prompt=prompt,
+            )
+        except AgentRecursionLimitError:
+            # The inner agent couldn't converge (e.g. the "Pago" button never enabled). Don't
+            # crash the booking graph — downgrade to NEEDS_RETRY like Phase 5/6's failure posture.
+            logger.warning("phase7_recursion_limit", thread_id=thread_id)
+            return {
+                "phase_outcome": PHASE7_NEEDS_RETRY,
+                "messages": [
+                    AIMessage(content="I couldn't complete the checkout. Please try again.")
+                ],
+            }
+
+        outcome = parse_phase_status(result.answer, PHASE7_STATUSES, PHASE7_NEEDS_RETRY)
+        if outcome != PHASE7_PAYMENT_READY:
+            # No valid STATUS -> downgrade. Log the agent's own final report: it usually says
+            # which field or button it got stuck on, which the fill/click traces then explain.
+            logger.warning(
+                "phase7_no_valid_status",
+                outcome=outcome,
+                iterations=result.iterations,
+                tools_used=result.tools_used,
+                agent_report=result.answer,
+            )
+            return {
+                "phase_outcome": outcome,
+                "messages": [AIMessage(content=result.answer)],
+            }
+
+        # Code owns the URL: read the redirect target (the payment link) directly rather than
+        # trusting the LLM to transcribe it, and build the final message code-side so the real
+        # link always reaches the user regardless of the LLM's phrasing.
+        payment_link = session.page.url
+        logger.info(
+            "phase7_completed",
+            outcome=outcome,
+            iterations=result.iterations,
+            tools_used=result.tools_used,
+        )
+        return {
+            "phase_outcome": outcome,
+            "payment_link": payment_link,
+            "messages": [
+                AIMessage(
+                    content=(
+                        "Your seats are reserved. Complete your payment here to confirm your "
+                        f"tickets:\n\n{payment_link}"
+                    )
+                )
+            ],
+        }
+
+    return phase_7_fill_and_pay
+
+
+def route_after_phase_7(state: BookingState) -> str:
+    """Map Phase 7's outcome to the next node name (the conditional edge)."""
+    if state["phase_outcome"] == PHASE7_PAYMENT_READY:
+        # The final move: the payment link was shared, so end the workflow.
+        return ROUTE_PAYMENT_SHARED
+    # No valid status (couldn't fill the form or reach payment) -> the generic retry inform exit.
     return ROUTE_INFORM_NEEDS_RETRY
 
 

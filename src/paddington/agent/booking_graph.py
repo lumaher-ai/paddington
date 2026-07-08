@@ -6,11 +6,11 @@ phases and whose edges encode the happy path plus the unhappy-path early exits. 
 phases' actual browser work is delegated to the inner ReAct agent via the phase nodes in
 ``booking_nodes``; this module only wires them together.
 
-Phases 1-6 are wired: Phase 1 finds showtimes, Phase 2 interrupts for the user's choice,
+Phases 1-7 are wired: Phase 1 finds showtimes, Phase 2 interrupts for the user's choice,
 Phase 3 navigates to the seat map and parses the seats, Phase 4 interrupts for the user's
 seat picks, Phase 5 clicks those seats on the seat map, Phase 6 prepares the order for
-payment (adds tickets and advances past food & drinks). Phase 6's ``ORDER_PREPARED`` branch
-stops at ``END`` as a placeholder for Phase 7 (form fill from ``.env``, a later slice).
+payment (adds tickets and advances past food & drinks), and Phase 7 fills the checkout form
+(PII from settings) and clicks "Pago", then shares the payment link and ends the workflow.
 """
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -27,6 +27,7 @@ from paddington.agent.booking_nodes import (
     ROUTE_INFORM_NO_SEATS,
     ROUTE_INFORM_NO_SHOWTIME,
     ROUTE_INFORM_THEATER_UNAVAILABLE,
+    ROUTE_PAYMENT_SHARED,
     ROUTE_PRESENT_SEATS,
     ROUTE_PRESENT_SHOWTIMES,
     ROUTE_SELECT_SEATS,
@@ -36,6 +37,7 @@ from paddington.agent.booking_nodes import (
     build_phase_4_node,
     build_phase_5_node,
     build_phase_6_node,
+    build_phase_7_node,
     inform_movie_unavailable,
     inform_needs_retry,
     inform_no_seats,
@@ -47,6 +49,7 @@ from paddington.agent.booking_nodes import (
     route_after_phase_4,
     route_after_phase_5,
     route_after_phase_6,
+    route_after_phase_7,
 )
 from paddington.agent.booking_state import BookingState
 from paddington.agent.showtime_extraction import ShowtimeExtractor
@@ -96,6 +99,10 @@ def build_booking_graph(
     # Phase 6 prepares the order for payment (adds tickets, advances past food & drinks).
     # Registered under ROUTE_CHECKOUT so Phase 5's SEATS_SELECTED branch routes straight to it.
     builder.add_node(ROUTE_CHECKOUT, build_phase_6_node(agent_loop))
+    # Phase 7 fills the checkout form (PII from settings) and clicks "Pago", then shares the
+    # payment link. Registered under ROUTE_FILL_FORM so Phase 6's ORDER_PREPARED branch routes
+    # straight to it. Takes the session to disable PII screenshots and read the redirect URL.
+    builder.add_node(ROUTE_FILL_FORM, build_phase_7_node(agent_loop, session))
     # Inform nodes registered under their route-constant names so the conditional
     # edge's path_map maps each route string straight to its node.
     builder.add_node(ROUTE_INFORM_MOVIE_UNAVAILABLE, inform_movie_unavailable)
@@ -157,14 +164,23 @@ def build_booking_graph(
             ROUTE_INFORM_NEEDS_RETRY: ROUTE_INFORM_NEEDS_RETRY,
         },
     )
-    # After Phase 6: the order is prepared, so flow to Phase 7 (form fill), which doesn't exist
-    # yet — ROUTE_FILL_FORM maps to END as a placeholder. A failure to prepare the order routes
-    # to the needs-retry inform exit.
+    # After Phase 6: the order is prepared, so flow to Phase 7 (fill the checkout form). A failure
+    # to prepare the order routes to the needs-retry inform exit.
     builder.add_conditional_edges(
         ROUTE_CHECKOUT,
         route_after_phase_6,
         {
-            ROUTE_FILL_FORM: END,
+            ROUTE_FILL_FORM: ROUTE_FILL_FORM,
+            ROUTE_INFORM_NEEDS_RETRY: ROUTE_INFORM_NEEDS_RETRY,
+        },
+    )
+    # After Phase 7 (the final move): a shared payment link ends the workflow; a failure to fill
+    # the form or reach payment routes to the needs-retry inform exit.
+    builder.add_conditional_edges(
+        ROUTE_FILL_FORM,
+        route_after_phase_7,
+        {
+            ROUTE_PAYMENT_SHARED: END,
             ROUTE_INFORM_NEEDS_RETRY: ROUTE_INFORM_NEEDS_RETRY,
         },
     )

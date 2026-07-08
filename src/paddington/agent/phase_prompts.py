@@ -391,18 +391,24 @@ the plus button again.
    render once the quantity is set) and look again before giving up.
 8. get_snapshot to verify the page advanced — a food-and-drinks page is now shown.
 
-## Part C — skip food & drinks
+## Part C — skip food & drinks, then STOP at the checkout form
 
 On the food-and-drinks page, do NOT add any food or drink:
-9. Find and click the button labelled "Continuar con el pago" to advance to the payment step.
-10. get_snapshot to verify the page advanced past food & drinks.
+9. Find and click the button labelled "Continuar con el pago" to advance.
+10. get_snapshot to verify the page advanced. You have ARRIVED when the checkout /
+    customer-details form appears — it asks for personal details (first name, last name,
+    email, and document / cédula) and has a "Pago" button at the bottom.
 
-Do NOT log in or enter any payment details; your job ends once you have clicked
-"Continuar con el pago" and the page has advanced to the payment step."""
+CRITICAL — the checkout form page is where your job ENDS. The instant that form is visible,
+STOP and report ORDER_PREPARED. Do NOT type into any field, and do NOT click the "Pago"
+button — filling the form and clicking "Pago" is the NEXT step's job, not yours. Clicking
+"Pago" now does nothing (the form is empty) and is an error that will loop forever. Do NOT
+log in or enter any payment details."""
 
 _PHASE6_ENDS_WHEN = (
-    'you have added {seat_quantity} tickets, clicked "Siguiente", and clicked '
-    '"Continuar con el pago" to reach the payment step'
+    'you have added {seat_quantity} tickets, clicked "Siguiente", clicked "Continuar con el '
+    'pago", and the checkout form (asking for name, email, and document, with a "Pago" button) '
+    'is visible — stop there WITHOUT typing into the form or clicking "Pago"'
 )
 
 
@@ -418,4 +424,77 @@ def phase6_prepare_order_prompt(seat_quantity: int) -> str:
         goal=_PHASE6_GOAL.format(seat_quantity=seat_quantity),
         ends_when=_PHASE6_ENDS_WHEN.format(seat_quantity=seat_quantity),
         statuses=PHASE6_STATUSES,
+    )
+
+
+# --- Phase 7: fill the checkout form and continue to payment -----------------
+# The final phase. Phase 6 left the browser on the payment/form page. The agent identifies
+# which form field is which (by label/placeholder), fills them all in ONE call to the
+# PII-safe fill_checkout_form tool (values come from settings — the LLM never sees or types
+# them), then clicks "Pago" to reach the payment page. The node captures the resulting URL
+# code-side (the payment link) — the LLM never transcribes it.
+
+# Phase 7 outcomes. Like Phase 5/6, only the happy token is advertised; NEEDS_RETRY is the
+# parser fallback when the form can't be filled or the "Pago" button never enables/advances.
+PHASE7_PAYMENT_READY = "PAYMENT_READY"
+PHASE7_NEEDS_RETRY = "NEEDS_RETRY"  # fallback / no valid status
+
+PHASE7_STATUSES = {
+    PHASE7_PAYMENT_READY,
+}
+
+_PHASE7_GOAL = """\
+Fill the checkout form and continue to payment. The payment/form page is already open from
+the previous step.
+
+## Part A — fill the form with fill_checkout_form
+
+1. get_snapshot to read the form and its fresh element refs.
+2. Identify which input ref is which of these four fields, by its label or placeholder:
+   - the first / given name field
+   - the last / family name field
+   - the email field
+   - the document / identity field (cédula / "documento" / "identificación")
+3. Call fill_checkout_form ONCE, mapping the refs:
+   fill_checkout_form(first_name_ref=..., last_name_ref=..., email_ref=..., document_ref=...)
+
+CRITICAL — the personal values (name, email, document) come from application settings and are
+filled internally by fill_checkout_form. You only say which ref is which field. Do NOT use
+input_text for these fields, and do NOT type any personal data yourself. If a field is missing
+from the form, still call fill_checkout_form for the fields that ARE present.
+
+## Part B — continue to payment with "Pago"
+
+4. get_snapshot again to confirm the fields were filled and to get fresh refs.
+5. Find the button whose accessible name is "Pago" (its visible label "Pago" sits in a span
+   inside the button, so in the snapshot it appears as a button named "Pago") and click its ref
+   ONCE. Clicking it submits the form and moves to the payment page.
+6. If the "Pago" button appears DISABLED, the form is not valid yet — get_snapshot and confirm
+   the fields hold values (re-run Part A if a field is empty) before looking for "Pago" again.
+7. get_snapshot and check the URL. If the page did NOT advance (same URL as before the click),
+   "Pago" silently did nothing because the form is missing a value — verify every field is filled
+   (re-run fill_checkout_form if any is empty) and click "Pago" once more.
+8. Once the page has advanced to the payment page (the URL changed), you are done. You do NOT
+   need to read or copy the URL — just confirm the page advanced, then report PAYMENT_READY.
+
+Do NOT enter any card/payment details — your job ends the moment the page reaches payment."""
+
+_PHASE7_ENDS_WHEN = (
+    'the checkout form is filled and you have clicked "Pago" and the page has advanced to the '
+    "payment page"
+)
+
+
+def phase7_fill_and_pay_prompt() -> str:
+    """System prompt for Phase 7 — fill the checkout form and click "Pago".
+
+    Takes no arguments: the form values are pulled from settings inside fill_checkout_form, so
+    the prompt only instructs the agent to map each form field to its ref, call that one tool,
+    then click "Pago" to reach the payment page. The node captures the resulting payment URL
+    code-side.
+    """
+    return build_phase_prompt(
+        goal=_PHASE7_GOAL,
+        ends_when=_PHASE7_ENDS_WHEN,
+        statuses=PHASE7_STATUSES,
     )
