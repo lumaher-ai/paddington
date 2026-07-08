@@ -9,11 +9,13 @@ Only Phase 1 lives here today; the ``StateGraph`` that wires these nodes (plus i
 and phases 2-6) is a later slice. See docs/phase-based-booking-architecture.md.
 """
 
+import contextlib
 from typing import Protocol
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
+from playwright.async_api import Error as PlaywrightError
 
 from paddington.agent.agent_loop import AgentLoop, AgentRecursionLimitError
 from paddington.agent.booking_state import BookingState
@@ -101,6 +103,10 @@ ROUTE_FILL_FORM = "fill_form"
 # Route name returned by route_after_phase_7 on success. Phase 7 is the final move, so this
 # maps straight to END — the node has already emitted the payment link as the last message.
 ROUTE_PAYMENT_SHARED = "payment_shared"
+
+# Host of the external payment gateway. The real payment link redirects here after the card
+# method is selected; a URL still on cinecolombia is the pre-redirect checkout page, not the link.
+_PLACETOPAY_HOST = "checkout.placetopay.com"
 
 
 def build_phase_1_node(
@@ -637,15 +643,17 @@ def build_phase_7_node(agent_loop: AgentLoop, session: BrowserSession) -> PhaseN
 
     The final phase. Phase 6 left the browser on the payment/form page. The agent identifies
     which form field is which and fills them all in ONE ``fill_checkout_form`` call (values come
-    from settings — the LLM never sees or types the PII), then clicks the "Pago" button to reach
-    the payment page. Unlike Phase 5/6 this node takes the ``session`` (like Phase 1/3) for two
-    reasons: it disables debug screenshotting for this PII phase, and it reads the redirect URL
-    (the payment link) code-side rather than trusting the LLM to transcribe it — the same
-    "code owns URLs" discipline Phase 1 uses for ``chosen_showtime_url``.
+    from settings — the LLM never sees or types the PII), clicks "Pago" to reach the
+    payment-method page, then selects the "Tarjeta de Débito / Crédito" card method, which
+    redirects to the external gateway (``checkout.placetopay.com``). Unlike Phase 5/6 this node
+    takes the ``session`` (like Phase 1/3) for two reasons: it disables debug screenshotting for
+    this PII phase, and it reads the redirect URL (the payment link) code-side rather than
+    trusting the LLM to transcribe it — the same "code owns URLs" discipline Phase 1 uses for
+    ``chosen_showtime_url``.
 
-    On success it writes ``payment_link`` and emits a final, code-built message containing that
-    URL. A failure to fill the form or reach payment yields no valid status and downgrades to
-    ``NEEDS_RETRY``.
+    On success it writes ``payment_link`` (verified to be on the gateway host) and emits a final,
+    code-built message containing that URL. A failure to fill the form, reach payment, or land on
+    the gateway yields ``NEEDS_RETRY`` rather than sharing the wrong (pre-redirect) checkout URL.
     """
 
     async def phase_7_fill_and_pay(state: BookingState, config: RunnableConfig) -> dict:
@@ -694,14 +702,32 @@ def build_phase_7_node(agent_loop: AgentLoop, session: BrowserSession) -> PhaseN
             }
 
         # Code owns the URL: read the redirect target (the payment link) directly rather than
-        # trusting the LLM to transcribe it, and build the final message code-side so the real
-        # link always reaches the user regardless of the LLM's phrasing.
+        # trusting the LLM to transcribe it. The real link lives on the external gateway
+        # (checkout.placetopay.com), reached only after the card payment method is selected. A
+        # cross-domain redirect can lag the agent's last get_snapshot, so give it a moment to
+        # settle, then verify the domain code-side.
+        if _PLACETOPAY_HOST not in session.page.url:
+            with contextlib.suppress(PlaywrightError):
+                await session.page.wait_for_url(f"**{_PLACETOPAY_HOST}**", timeout=15_000)
+
         payment_link = session.page.url
+        if _PLACETOPAY_HOST not in payment_link:
+            # Still on the cinecolombia checkout page -> the payment-method selection didn't
+            # complete. Do NOT share the wrong (checkout) link; downgrade like the other failures.
+            logger.warning("phase7_no_gateway_redirect", url=payment_link, thread_id=thread_id)
+            return {
+                "phase_outcome": PHASE7_NEEDS_RETRY,
+                "messages": [
+                    AIMessage(content="I couldn't reach the payment gateway. Please try again.")
+                ],
+            }
+
         logger.info(
             "phase7_completed",
             outcome=outcome,
             iterations=result.iterations,
             tools_used=result.tools_used,
+            gateway=True,
         )
         return {
             "phase_outcome": outcome,

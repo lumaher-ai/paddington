@@ -431,8 +431,10 @@ def phase6_prepare_order_prompt(seat_quantity: int) -> str:
 # The final phase. Phase 6 left the browser on the payment/form page. The agent identifies
 # which form field is which (by label/placeholder), fills them all in ONE call to the
 # PII-safe fill_checkout_form tool (values come from settings — the LLM never sees or types
-# them), then clicks "Pago" to reach the payment page. The node captures the resulting URL
-# code-side (the payment link) — the LLM never transcribes it.
+# them), clicks "Pago" to reach the payment-method page, then selects the "Tarjeta de Débito /
+# Crédito" card method — which redirects to the EXTERNAL gateway (checkout.placetopay.com).
+# That gateway URL is the real payment link; the node captures and verifies it code-side (the
+# LLM never transcribes it), and rejects the pre-redirect cinecolombia checkout URL.
 
 # Phase 7 outcomes. Like Phase 5/6, only the happy token is advertised; NEEDS_RETRY is the
 # parser fallback when the form can't be filled or the "Pago" button never enables/advances.
@@ -474,24 +476,41 @@ from the form, still call fill_checkout_form for the fields that ARE present.
 7. get_snapshot and check the URL. If the page did NOT advance (same URL as before the click),
    "Pago" silently did nothing because the form is missing a value — verify every field is filled
    (re-run fill_checkout_form if any is empty) and click "Pago" once more.
-8. Once the page has advanced to the payment page (the URL changed), you are done. You do NOT
-   need to read or copy the URL — just confirm the page advanced, then report PAYMENT_READY.
+8. Once the page has advanced to the payment page (`/order/payment`, showing payment-method
+   options), proceed to Part C — you are NOT done yet.
 
-Do NOT enter any card/payment details — your job ends the moment the page reaches payment."""
+## Part C — select the payment method (this produces the final payment link)
+
+The payment page shows one or more payment-method buttons. Pick the card option to reach the
+real payment gateway.
+9.  get_snapshot to read the payment-method buttons and their fresh refs.
+10. Find the button for paying with a debit / credit card — "Tarjeta de Débito / Crédito"
+    (it may appear as "Pagar con Tarjeta de Débito / Crédito" or similar "Pagar con …" card
+    option). Click its ref ONCE. If several "Pagar con …" buttons appear, choose the card /
+    "Tarjeta" one.
+11. Clicking it redirects the browser to an EXTERNAL payment gateway on a DIFFERENT domain
+    (checkout.placetopay.com). get_snapshot and confirm the URL is now on checkout.placetopay.com.
+12. Once the page is on checkout.placetopay.com you are done — report PAYMENT_READY. Do NOT
+    enter any card details.
+
+Do NOT enter any card details — your job ends the moment the browser redirects to the external
+payment gateway (checkout.placetopay.com)."""
 
 _PHASE7_ENDS_WHEN = (
-    'the checkout form is filled and you have clicked "Pago" and the page has advanced to the '
-    "payment page"
+    'the checkout form is filled, you have clicked "Pago", selected the "Tarjeta de Débito / '
+    'Crédito" payment method, and the browser has redirected to the external payment gateway '
+    "(a checkout.placetopay.com URL)"
 )
 
 
 def phase7_fill_and_pay_prompt() -> str:
-    """System prompt for Phase 7 — fill the checkout form and click "Pago".
+    """System prompt for Phase 7 — fill the checkout form, click "Pago", pick the card method.
 
     Takes no arguments: the form values are pulled from settings inside fill_checkout_form, so
     the prompt only instructs the agent to map each form field to its ref, call that one tool,
-    then click "Pago" to reach the payment page. The node captures the resulting payment URL
-    code-side.
+    click "Pago" to reach the payment-method page, then select the "Tarjeta de Débito / Crédito"
+    method so the browser redirects to the external gateway (checkout.placetopay.com). The node
+    captures and verifies that gateway URL code-side.
     """
     return build_phase_prompt(
         goal=_PHASE7_GOAL,
