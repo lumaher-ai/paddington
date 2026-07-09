@@ -34,6 +34,12 @@ class InteractiveElement(BaseModel):
         description="ARIA role of the element, e.g. 'link', 'button', 'textbox'.",
     )
     name: str = Field(description="Accessible name shown to the user.")
+    content: str = Field(
+        default="",
+        description="Visible text of the element when it differs from `name` — the disambiguator "
+        "for elements with identical or empty accessible names"
+        "Empty when `name` already conveys the text.",
+    )
     href: str | None = Field(
         default=None,
         description="Absolute URL for link elements; None for non-links. Read by code "
@@ -43,6 +49,12 @@ class InteractiveElement(BaseModel):
         default=False,
         description="True when the element is disabled/inert (native `disabled` or "
         "aria-disabled). Clicking it does nothing — don't retry it; pick another action.",
+    )
+    pressed: bool = Field(
+        default=False,
+        description="True when the element is a toggle/selectable control in its "
+        'selected/pressed state (aria-pressed="true" or data-pressed) — e.g. an '
+        "already-selected seat. Re-clicking a pressed control DESELECTS it.",
     )
 
 

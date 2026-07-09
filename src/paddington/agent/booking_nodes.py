@@ -34,7 +34,6 @@ from paddington.agent.phase_prompts import (
     PHASE4_SEATS_CHOSEN,
     PHASE5_NEEDS_RETRY,
     PHASE5_SEATS_SELECTED,
-    PHASE5_STATUSES,
     PHASE6_NEEDS_RETRY,
     PHASE6_ORDER_PREPARED,
     PHASE6_STATUSES,
@@ -44,11 +43,11 @@ from paddington.agent.phase_prompts import (
     parse_phase_status,
     phase1_find_showtimes_prompt,
     phase3_get_to_seats_prompt,
-    phase5_select_seats_prompt,
     phase6_prepare_order_prompt,
     phase7_fill_and_pay_prompt,
 )
-from paddington.agent.seat_extraction import offered_seats, parse_seat_map
+from paddington.agent.seat_extraction import offered_seats, parse_seat_map, parse_seat_name
+from paddington.schemas.browser import InteractiveElement
 from paddington.agent.showtime_extraction import (
     ShowtimeExtractor,
     default_showtime_extractor,

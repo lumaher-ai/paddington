@@ -82,7 +82,14 @@ _COLLECT_INTERACTIVE_JS = """
     // Surfaced so the agent doesn't keep clicking a maxed/greyed control (e.g. a "+"
     // quantity stepper at its cap) and so click() can fail fast instead of blocking.
     const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true';
-    return { ref, role, name, href, disabled };
+    // Visible text, same hygiene as `name`. Surfaced ONLY when it differs from `name` — this is
+    // what disambiguates elements with identical/empty accessible names.
+    const content = (el.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 200);
+    const distinguishingContent = content && content !== name ? content : '';
+    // Selected/pressed state of a toggle control (e.g. an already-selected seat). Surfaced so
+    // code can be idempotent — re-clicking a pressed control DESELECTS it.
+    const pressed = el.getAttribute('aria-pressed') === 'true' || el.hasAttribute('data-pressed');
+    return { ref, role, name, href, disabled, content: distinguishingContent, pressed };
   });
 }
 """

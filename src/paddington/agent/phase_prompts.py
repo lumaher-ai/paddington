@@ -471,23 +471,16 @@ from the form, still call fill_checkout_form for the fields that ARE present.
 5. Find the button whose accessible name is "Pago" (its visible label "Pago" sits in a span
    inside the button, so in the snapshot it appears as a button named "Pago") and click its ref
    ONCE. Clicking it submits the form and moves to the payment page.
-6. If the "Pago" button appears DISABLED, the form is not valid yet — get_snapshot and confirm
-   the fields hold values (re-run Part A if a field is empty) before looking for "Pago" again.
-7. get_snapshot and check the URL. If the page did NOT advance (same URL as before the click),
-   "Pago" silently did nothing because the form is missing a value — verify every field is filled
-   (re-run fill_checkout_form if any is empty) and click "Pago" once more.
-8. Once the page has advanced to the payment page (`/order/payment`, showing payment-method
-   options), proceed to Part C — you are NOT done yet.
 
-## Part C — select the payment method (this produces the final payment link)
+## Part C — select the payment method "Tarjeta de Débito / Crédito"
 
-The payment page shows one or more payment-method buttons. Pick the card option to reach the
+The payment page shows "Opciones de pago" section. Pick "Tarjeta de Débito / Crédito" reach the
 real payment gateway.
 9.  get_snapshot to read the payment-method buttons and their fresh refs.
-10. Find the button for paying with a debit / credit card — "Tarjeta de Débito / Crédito"
-    (it may appear as "Pagar con Tarjeta de Débito / Crédito" or similar "Pagar con …" card
-    option). Click its ref ONCE. If several "Pagar con …" buttons appear, choose the card /
-    "Tarjeta" one.
+10. Find the debit/credit card payment method. The payment-method buttons may share the SAME
+    name tell them apart by their `content` (the visible label). Click the ref
+    of the button whose content is "Tarjeta de Débito / Crédito". Do NOT pick any other method. 
+    Click it ONCE.
 11. Clicking it redirects the browser to an EXTERNAL payment gateway on a DIFFERENT domain
     (checkout.placetopay.com). get_snapshot and confirm the URL is now on checkout.placetopay.com.
 12. Once the page is on checkout.placetopay.com you are done — report PAYMENT_READY. Do NOT
