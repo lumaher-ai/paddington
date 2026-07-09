@@ -20,9 +20,11 @@ from playwright.async_api import (
 )
 
 from paddington.browser.debug_recorder import DebugRecorder
+from paddington.config import get_settings
 from paddington.logging_config import get_logger
 from paddington.schemas.browser import (
     ClickResult,
+    FillCheckoutFormResult,
     InputResult,
     InteractiveElement,
     NavigateResult,
@@ -80,7 +82,14 @@ _COLLECT_INTERACTIVE_JS = """
     // Surfaced so the agent doesn't keep clicking a maxed/greyed control (e.g. a "+"
     // quantity stepper at its cap) and so click() can fail fast instead of blocking.
     const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true';
-    return { ref, role, name, href, disabled };
+    // Visible text, same hygiene as `name`. Surfaced ONLY when it differs from `name` — this is
+    // what disambiguates elements with identical/empty accessible names.
+    const content = (el.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 200);
+    const distinguishingContent = content && content !== name ? content : '';
+    // Selected/pressed state of a toggle control (e.g. an already-selected seat). Surfaced so
+    // code can be idempotent — re-clicking a pressed control DESELECTS it.
+    const pressed = el.getAttribute('aria-pressed') === 'true' || el.hasAttribute('data-pressed');
+    return { ref, role, name, href, disabled, content: distinguishingContent, pressed };
   });
 }
 """
@@ -109,7 +118,8 @@ class BrowserSession:
         Calls page.screenshot directly (not self.screenshot) to avoid the
         per-call info log and any chance of recursion.
         """
-        if self.recorder is None:
+        # recorder disabled (None) or turned off mid-run by a PII phase -> capture nothing.
+        if self.recorder is None or not self.recorder.enabled:
             return
         try:
             png = await self.page.screenshot(full_page=False, type="png")
@@ -460,6 +470,82 @@ class BrowserSession:
             success=success,
             ref=ref,
             value_set=value_set,
+            elapsed_ms=elapsed_ms,
+            error=error,
+        )
+
+    async def fill_checkout_form(
+        self,
+        first_name_ref: str,
+        last_name_ref: str,
+        email_ref: str,
+        document_ref: str,
+        timeout_ms: int = 30_000,
+    ) -> FillCheckoutFormResult:
+        """Fill the checkout PII fields from settings, keyed by ref.
+
+        The caller (LLM) only supplies which ref is which field; the actual values
+        come from settings and are resolved here so PII never crosses the tool
+        boundary into the conversation / checkpoint / model API.
+        """
+        start = time.perf_counter()
+        error: str | None = None
+        filled_refs: list[str] = []
+        failed_refs: dict[str, str] = {}
+
+        settings = get_settings()
+        # Ordered so the fill happens top-to-bottom as a human would.
+        field_map = {
+            first_name_ref: settings.booking_full_name,
+            last_name_ref: settings.booking_last_name,
+            email_ref: settings.booking_email,
+            document_ref: settings.booking_dni,
+        }
+
+        for ref, value in field_map.items():
+            selector = self._ref_map.get(ref)
+            if selector is None:
+                failed_refs[ref] = (
+                    f"unknown ref {ref!r}. Call get_snapshot() to refresh available refs."
+                )
+                continue
+
+            locator = self.page.locator(selector)
+
+            # Same fast-fail as input_text: a disabled field never becomes fillable.
+            try:
+                enabled = await locator.is_enabled(timeout=2_000)
+            except PlaywrightError:
+                enabled = True
+            if not enabled:
+                failed_refs[ref] = f"element {ref!r} is disabled and cannot be typed into."
+                continue
+
+            try:
+                # No press_enter: filling a checkout form must not submit it.
+                await locator.fill(value, timeout=timeout_ms)
+                filled_refs.append(ref)
+            except PlaywrightTimeoutError:
+                failed_refs[ref] = f"input timed out after {timeout_ms}ms"
+            except PlaywrightError as e:
+                failed_refs[ref] = str(e)
+
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        success = not failed_refs and error is None and not self.page.is_closed()
+
+        # Intentionally do NOT call self._capture_debug(): the filled form shows the
+        # user's name/email/document, and a debug screenshot would persist that PII to
+        # disk. Keep this omission — do not "restore" the capture for consistency.
+        logger.info(
+            "browser_fill_checkout_form",
+            filled=len(filled_refs),
+            failed=len(failed_refs),
+            elapsed_ms=elapsed_ms,
+        )
+        return FillCheckoutFormResult(
+            success=success,
+            filled_refs=filled_refs,
+            failed_refs=failed_refs,
             elapsed_ms=elapsed_ms,
             error=error,
         )

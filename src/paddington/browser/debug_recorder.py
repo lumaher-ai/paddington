@@ -27,6 +27,9 @@ class DebugRecorder:
         self.run_dir = thread_dir / datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._step = 0
+        # A PII-handling phase can flip this off to suppress on-disk screenshots for the
+        # rest of the run without discarding the recorder (see BrowserSession._capture_debug).
+        self.enabled = True
 
     def write(self, tool_name: str, png: bytes) -> None:
         """Persist one PNG frame for the current step, then advance the step."""

@@ -9,6 +9,7 @@ from playwright.async_api import Error as PlaywrightError
 from paddington.browser.browser_session import BrowserSession
 from paddington.schemas.browser import (
     ClickResult,
+    FillCheckoutFormResult,
     InputResult,
     NavigateResult,
     PageSnapshot,
@@ -144,4 +145,41 @@ def build_browser_tools(session: BrowserSession) -> list[BaseTool]:
             }
         )
 
-    return [navigate_to, get_snapshot, click, input_text, take_screenshot]
+    @tool
+    async def fill_checkout_form(
+        first_name_ref: str,
+        last_name_ref: str,
+        email_ref: str,
+        document_ref: str,
+        timeout_ms: int = 30_000,
+    ) -> FillCheckoutFormResult:
+        """Fill the checkout form fields identified by their refs.
+
+        Values (name, email, document) come from application settings and are filled
+        internally — NEVER pass personal data as parameters. Just tell me which ref from
+        the latest get_snapshot is which field. Refs come from a recent get_snapshot
+        (e.g. 'el_3'); refresh with get_snapshot if they may be stale.
+
+        Args:
+            first_name_ref: Ref of the first/given-name input.
+            last_name_ref: Ref of the last/family-name input.
+            email_ref: Ref of the email input.
+            document_ref: Ref of the document / cédula input.
+            timeout_ms: Max milliseconds per field.
+        """
+        return await session.fill_checkout_form(
+            first_name_ref,
+            last_name_ref,
+            email_ref,
+            document_ref,
+            timeout_ms=timeout_ms,
+        )
+
+    return [
+        navigate_to,
+        get_snapshot,
+        click,
+        input_text,
+        take_screenshot,
+        fill_checkout_form,
+    ]

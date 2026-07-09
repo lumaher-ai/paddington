@@ -1,6 +1,5 @@
-from collections.abc import AsyncIterator, Generator
+from collections.abc import AsyncIterator
 
-import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import (
@@ -10,8 +9,6 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from paddington.database import Base
-from paddington.dependencies import get_db_session
-from paddington.main import app
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 

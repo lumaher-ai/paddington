@@ -15,34 +15,38 @@ from paddington.schemas.browser import InteractiveElement, PageSnapshot
 
 # A Phase 3 answer that reaches the seat map, so a selection flows all the way through.
 _SEAT_MAP_ANSWER = "The seat map is on screen.\nSTATUS: SEAT_MAP_VISIBLE"
-# A Phase 5 answer that clicks the seats, so the flow continues into Phase 6.
-_SEATS_SELECTED_ANSWER = "Both seats are selected.\nSTATUS: SEATS_SELECTED"
-# A Phase 6 answer that prepares the order, so the flow runs to END.
+# A Phase 6 answer that prepares the order, so the flow continues into Phase 7.
 _ORDER_PREPARED_ANSWER = "Added the tickets and continued to payment.\nSTATUS: ORDER_PREPARED"
+# A Phase 7 answer that fills the form and picks the card method, so the flow runs to END.
+_PAYMENT_READY_ANSWER = "Filled the form and selected the card method.\nSTATUS: PAYMENT_READY"
+
+_SEATS_URL = "https://multiplex.cinecolombia.com/order/showtimes/6493-7284/seats"
+_TICKETS_URL = "https://multiplex.cinecolombia.com/order/showtimes/6493-7284/tickets"
+_PLACETOPAY_URL = "https://checkout.placetopay.com/spa/session/262085824/26a5a9c0"
 
 
 @dataclass
 class _FakeAgentLoop:
     """Stand-in for AgentLoop: returns a per-phase canned answer so the graph runs through.
 
-    Phases 1, 3, 5, and 6 all run the inner agent; they are told apart by the isolated
-    thread-id suffix (``:p1`` / ``:p3`` / ``:p5`` / ``:p6``) so one fake can serve all with
-    distinct STATUS lines.
+    Phases 1, 3, 6, and 7 run the inner agent; they are told apart by the isolated thread-id
+    suffix (``:p1`` / ``:p3`` / ``:p6`` / ``:p7``). Phase 5 is a deterministic, code-owned node
+    (no inner agent) — its behavior is driven by the fake session, not this loop.
     """
 
     answer: str
     phase3_answer: str = _SEAT_MAP_ANSWER
-    phase5_answer: str = _SEATS_SELECTED_ANSWER
     phase6_answer: str = _ORDER_PREPARED_ANSWER
+    phase7_answer: str = _PAYMENT_READY_ANSWER
 
     async def run(self, **kwargs) -> AgentResult:
         thread_id = kwargs.get("thread_id", "")
         if thread_id.endswith(":p3"):
             answer = self.phase3_answer
-        elif thread_id.endswith(":p5"):
-            answer = self.phase5_answer
         elif thread_id.endswith(":p6"):
             answer = self.phase6_answer
+        elif thread_id.endswith(":p7"):
+            answer = self.phase7_answer
         else:
             answer = self.answer
         return AgentResult(
@@ -55,11 +59,13 @@ class _FakeAgentLoop:
         )
 
 
-# Default seat map for Phase 3's get_snapshot: two available seats + a non-seat button.
+# Default seat map for Phase 3's parse + Phase 5's deterministic selection: two available seats,
+# a non-seat button, and the confirm button Phase 5 clicks to advance.
 _DEFAULT_SEATS = [
     InteractiveElement(ref="el_1", role="button", name="Iniciar sesión"),
     InteractiveElement(ref="el_2", role="button", name="Silla A1"),
     InteractiveElement(ref="el_3", role="button", name="Silla A2"),
+    InteractiveElement(ref="el_4", role="button", name="Seleccionar boletas"),
 ]
 
 
@@ -76,17 +82,42 @@ def _snapshot(elements: list[InteractiveElement] | None) -> PageSnapshot | None:
     )
 
 
+class _FakePage:
+    """Playwright Page stand-in for the URL checks in Phase 5 (leaves /seats) and Phase 7
+    (reaches the placetopay gateway). Each ``wait_for_url`` advances to the next queued URL."""
+
+    def __init__(self, url: str = "", next_urls: list[str] | None = None) -> None:
+        self.url = url
+        self._next = list(next_urls or [])
+
+    async def wait_for_url(self, predicate, timeout: int = 0) -> None:  # noqa: ANN001
+        # Simulate a redirect settling: advance to the next queued URL (or stay put if none).
+        if self._next:
+            self.url = self._next.pop(0)
+
+
+class _ClickRes:
+    def __init__(self, success: bool = True) -> None:
+        self.success = success
+
+
 class _FakeSession:
     """BrowserSession stand-in. Phase 1 reads ``last_snapshot`` (showtime links); Phase 3
-    calls ``get_snapshot()`` for the seat map."""
+    calls ``get_snapshot()`` for the seat map; Phase 5 clicks seats + confirm and reads
+    ``page.url`` to verify it left the map; Phase 7 reads ``recorder`` + ``page.url``."""
 
     def __init__(
         self,
         last_snapshot: PageSnapshot | None = None,
         seat_snapshot: PageSnapshot | None = None,
+        page: _FakePage | None = None,
     ) -> None:
         self.last_snapshot = last_snapshot
         self._seat_snapshot = seat_snapshot
+        self.page = page or _FakePage()
+        self.clicked: list[str] = []
+        # Phase 7 disables debug recording for PII; None means "already off" (no-op).
+        self.recorder = None
 
     async def get_snapshot(self, *args, **kwargs) -> PageSnapshot:
         if self._seat_snapshot is not None:
@@ -100,12 +131,26 @@ class _FakeSession:
             total_chars=0,
         )
 
+    async def click(self, ref: str, *args, **kwargs) -> _ClickRes:
+        self.clicked.append(ref)
+        return _ClickRes(True)
+
 
 def _session(
     links: list[InteractiveElement] | None = None,
     seats: list[InteractiveElement] | None = _DEFAULT_SEATS,
+    page: _FakePage | None = None,
 ) -> BrowserSession:
-    return cast(BrowserSession, _FakeSession(_snapshot(links), _snapshot(seats)))
+    # Default page walks the happy path: on the seat map, then Phase 5's confirm redirects to
+    # /tickets, then Phase 7's card-method click redirects to the placetopay gateway.
+    return cast(
+        BrowserSession,
+        _FakeSession(
+            _snapshot(links),
+            _snapshot(seats),
+            page or _FakePage(_SEATS_URL, next_urls=[_TICKETS_URL, _PLACETOPAY_URL]),
+        ),
+    )
 
 
 # Deterministic Option-B extractor double: skips the live LLM and returns two showtimes
@@ -209,15 +254,21 @@ async def test_full_flow_selecting_seats_reaches_end() -> None:
     )
 
     assert "__interrupt__" not in final
-    # The pick flows into Phase 5 (clicks the seats) then Phase 6 (prepares the order),
-    # which reports ORDER_PREPARED as the terminal outcome.
-    assert final["phase_outcome"] == "ORDER_PREPARED"
+    # The pick flows through Phase 5 (clicks the seats), Phase 6 (prepares the order), and
+    # Phase 7 (fills the form + picks the card method), which reaches the payment gateway and
+    # reports PAYMENT_READY as the terminal outcome.
+    assert final["phase_outcome"] == "PAYMENT_READY"
     assert final["chosen_seats"] == ["A1", "A2"]
+    # Phase 7 captured the real payment link (the external gateway), not the checkout URL.
+    assert final["payment_link"] == _PLACETOPAY_URL
+    assert "checkout.placetopay.com" in _contents(final)
 
 
 async def test_phase_5_failure_routes_to_inform_needs_retry() -> None:
-    loop = _FakeAgentLoop(_FOUND_ANSWER, phase5_answer="Couldn't click the seats.")
-    graph = _graph(_FOUND_ANSWER, loop=loop)
+    # Deterministic Phase 5 fails when the page never leaves the seat map after confirm
+    # (url_after=None) → NEEDS_RETRY → inform exit with the retry message.
+    stuck_session = _session(page=_FakePage(_SEATS_URL, next_urls=[]))
+    graph = _graph(_FOUND_ANSWER, session=stuck_session)
 
     await graph.ainvoke(_state(), config=_CONFIG)
     await graph.ainvoke(Command(resume={"action": "select", "showtime_id": "st_2"}), config=_CONFIG)
@@ -225,7 +276,6 @@ async def test_phase_5_failure_routes_to_inform_needs_retry() -> None:
         Command(resume={"action": "select", "seats": ["A1", "A2"]}), config=_CONFIG
     )
 
-    # Phase 5 emitted no valid STATUS → NEEDS_RETRY → inform exit with the retry message.
     assert "__interrupt__" not in final
     assert final["phase_outcome"] == "NEEDS_RETRY"
     assert "Please try again" in _contents(final)

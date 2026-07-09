@@ -264,70 +264,9 @@ PHASE5_STATUSES = {
     PHASE5_SEATS_SELECTED,
 }
 
-_PHASE5_GOAL = """\
-Select the seats the user chose, then confirm the selection to advance.
-The interactive seat map is already open from the previous step.
-
-Seats to select: {named_seats}
-
-Work through the chosen seats ONE AT A TIME:
-1. get_snapshot to read the current seat map and its fresh element refs.
-2. Find the button for the next chosen seat you have NOT clicked yet. An available
-   seat's accessible name ends with its label — "Silla K10", or for a companion
-   seat "Silla acompañante K10". Skip any seat whose name contains "no disponible"
-   (already taken).
-3. click that seat's ref exactly once. Clicking selects the seat.
-4. get_snapshot again — the click changed the page and regenerated every ref.
-
-CRITICAL — do not toggle seats. Click each chosen seat EXACTLY ONCE. Keep track of
-which seats you have already clicked; a seat you already selected will look
-different now (highlighted, or its name changes — e.g. it no longer reads plainly
-"Silla <LABEL>"). NEVER click a seat you have already selected: a second click
-DESELECTS it and you will loop forever. If all your chosen seats already appear
-selected, stop clicking seats and move on.
-
-Once EVERY chosen seat is selected, confirm the selection:
-5. Find and click the button that continues to the next step — the bottom button
-   labelled "Seleccionar boletas" (accept "Continuar" or "Confirmar" if that exact
-   label is not present). It may only appear once the required number of seats is
-   selected, so if you do not see it, get_snapshot once more and look again.
-   Click it ONCE, then get_snapshot — the page may take a moment to advance, so do
-   not immediately click it again just because the URL hasn't changed yet.
-6. get_snapshot and read the page URL. The seat map's URL ends in "/seats". The
-   moment the URL no longer ends in "/seats" (for example it now ends in "/tickets"),
-   you have SUCCEEDED — STOP IMMEDIATELY and report SEATS_SELECTED.
-
-CRITICAL — the instant the page leaves the seat map, your job is DONE. Do NOT click
-"Siguiente", do NOT change ticket quantities, and do NOT click ANY button on the
-ticket/quantity page that follows — that is a later step's job, not yours. Clicking
-anything there is an error.
-
-If a chosen seat is missing or reads "no disponible", do not substitute another
-seat — report that you could not select it. Do NOT log in or enter any payment
-details; your job ends the moment the page advances past the seat map."""
-
-_PHASE5_ENDS_WHEN = (
-    'every chosen seat is selected, you have clicked "Seleccionar boletas" '
-    '("Continuar"/"Confirmar"), and the page has left the seat map (its URL no longer '
-    'ends in "/seats") — stop there and click nothing on the next page (or a chosen '
-    "seat is unavailable and cannot be selected)"
-)
-
-
-def phase5_select_seats_prompt(chosen_seats: list[str]) -> str:
-    """System prompt for Phase 5 — click each chosen seat on the open seat map.
-
-    ``chosen_seats`` are the durable labels the Phase 4 interrupt validated and persisted
-    (e.g. ``["K10", "K11"]``). Each is rendered as its expected accessible name
-    (``"Silla K10"``) so the agent can find the matching button in a fresh snapshot and
-    click its ref — the ref itself is never carried in state (see ``seat_extraction``).
-    """
-    named_seats = ", ".join(f'"Silla {label}"' for label in chosen_seats)
-    return build_phase_prompt(
-        goal=_PHASE5_GOAL.format(named_seats=named_seats),
-        ends_when=_PHASE5_ENDS_WHEN,
-        statuses=PHASE5_STATUSES,
-    )
+# Phase 5 is now a deterministic, code-owned node (build_phase_5_node in booking_nodes) — it
+# clicks each chosen seat exactly once and confirms, with no inner agent. So there is no Phase 5
+# system prompt; only the outcome tokens above remain, consumed by the node and route_after_phase_5.
 
 
 # --- Phase 6: prepare the order for payment ----------------------------------
@@ -391,18 +330,24 @@ the plus button again.
    render once the quantity is set) and look again before giving up.
 8. get_snapshot to verify the page advanced — a food-and-drinks page is now shown.
 
-## Part C — skip food & drinks
+## Part C — skip food & drinks, then STOP at the checkout form
 
 On the food-and-drinks page, do NOT add any food or drink:
-9. Find and click the button labelled "Continuar con el pago" to advance to the payment step.
-10. get_snapshot to verify the page advanced past food & drinks.
+9. Find and click the button labelled "Continuar con el pago" to advance.
+10. get_snapshot to verify the page advanced. You have ARRIVED when the checkout /
+    customer-details form appears — it asks for personal details (first name, last name,
+    email, and document / cédula) and has a "Pago" button at the bottom.
 
-Do NOT log in or enter any payment details; your job ends once you have clicked
-"Continuar con el pago" and the page has advanced to the payment step."""
+CRITICAL — the checkout form page is where your job ENDS. The instant that form is visible,
+STOP and report ORDER_PREPARED. Do NOT type into any field, and do NOT click the "Pago"
+button — filling the form and clicking "Pago" is the NEXT step's job, not yours. Clicking
+"Pago" now does nothing (the form is empty) and is an error that will loop forever. Do NOT
+log in or enter any payment details."""
 
 _PHASE6_ENDS_WHEN = (
-    'you have added {seat_quantity} tickets, clicked "Siguiente", and clicked '
-    '"Continuar con el pago" to reach the payment step'
+    'you have added {seat_quantity} tickets, clicked "Siguiente", clicked "Continuar con el '
+    'pago", and the checkout form (asking for name, email, and document, with a "Pago" button) '
+    'is visible — stop there WITHOUT typing into the form or clicking "Pago"'
 )
 
 
@@ -418,4 +363,89 @@ def phase6_prepare_order_prompt(seat_quantity: int) -> str:
         goal=_PHASE6_GOAL.format(seat_quantity=seat_quantity),
         ends_when=_PHASE6_ENDS_WHEN.format(seat_quantity=seat_quantity),
         statuses=PHASE6_STATUSES,
+    )
+
+
+# --- Phase 7: fill the checkout form and continue to payment -----------------
+# The final phase. Phase 6 left the browser on the payment/form page. The agent identifies
+# which form field is which (by label/placeholder), fills them all in ONE call to the
+# PII-safe fill_checkout_form tool (values come from settings — the LLM never sees or types
+# them), clicks "Pago" to reach the payment-method page, then selects the "Tarjeta de Débito /
+# Crédito" card method — which redirects to the EXTERNAL gateway (checkout.placetopay.com).
+# That gateway URL is the real payment link; the node captures and verifies it code-side (the
+# LLM never transcribes it), and rejects the pre-redirect cinecolombia checkout URL.
+
+# Phase 7 outcomes. Like Phase 5/6, only the happy token is advertised; NEEDS_RETRY is the
+# parser fallback when the form can't be filled or the "Pago" button never enables/advances.
+PHASE7_PAYMENT_READY = "PAYMENT_READY"
+PHASE7_NEEDS_RETRY = "NEEDS_RETRY"  # fallback / no valid status
+
+PHASE7_STATUSES = {
+    PHASE7_PAYMENT_READY,
+}
+
+_PHASE7_GOAL = """\
+Fill the checkout form and continue to payment. The payment/form page is already open from
+the previous step.
+
+## Part A — fill the form with fill_checkout_form
+
+1. get_snapshot to read the form and its fresh element refs.
+2. Identify which input ref is which of these four fields, by its label or placeholder:
+   - the first / given name field
+   - the last / family name field
+   - the email field
+   - the document / identity field (cédula / "documento" / "identificación")
+3. Call fill_checkout_form ONCE, mapping the refs:
+   fill_checkout_form(first_name_ref=..., last_name_ref=..., email_ref=..., document_ref=...)
+
+CRITICAL — the personal values (name, email, document) come from application settings and are
+filled internally by fill_checkout_form. You only say which ref is which field. Do NOT use
+input_text for these fields, and do NOT type any personal data yourself. If a field is missing
+from the form, still call fill_checkout_form for the fields that ARE present.
+
+## Part B — continue to payment with "Pago"
+
+4. get_snapshot again to confirm the fields were filled and to get fresh refs.
+5. Find the button whose accessible name is "Pago" (its visible label "Pago" sits in a span
+   inside the button, so in the snapshot it appears as a button named "Pago") and click its ref
+   ONCE. Clicking it submits the form and moves to the payment page.
+
+## Part C — select the payment method "Tarjeta de Débito / Crédito"
+
+The payment page shows "Opciones de pago" section. Pick "Tarjeta de Débito / Crédito" reach the
+real payment gateway.
+9.  get_snapshot to read the payment-method buttons and their fresh refs.
+10. Find the debit/credit card payment method. The payment-method buttons may share the SAME
+    name tell them apart by their `content` (the visible label). Click the ref
+    of the button whose content is "Tarjeta de Débito / Crédito". Do NOT pick any other method. 
+    Click it ONCE.
+11. Clicking it redirects the browser to an EXTERNAL payment gateway on a DIFFERENT domain
+    (checkout.placetopay.com). get_snapshot and confirm the URL is now on checkout.placetopay.com.
+12. Once the page is on checkout.placetopay.com you are done — report PAYMENT_READY. Do NOT
+    enter any card details.
+
+Do NOT enter any card details — your job ends the moment the browser redirects to the external
+payment gateway (checkout.placetopay.com)."""
+
+_PHASE7_ENDS_WHEN = (
+    'the checkout form is filled, you have clicked "Pago", selected the "Tarjeta de Débito / '
+    'Crédito" payment method, and the browser has redirected to the external payment gateway '
+    "(a checkout.placetopay.com URL)"
+)
+
+
+def phase7_fill_and_pay_prompt() -> str:
+    """System prompt for Phase 7 — fill the checkout form, click "Pago", pick the card method.
+
+    Takes no arguments: the form values are pulled from settings inside fill_checkout_form, so
+    the prompt only instructs the agent to map each form field to its ref, call that one tool,
+    click "Pago" to reach the payment-method page, then select the "Tarjeta de Débito / Crédito"
+    method so the browser redirects to the external gateway (checkout.placetopay.com). The node
+    captures and verifies that gateway URL code-side.
+    """
+    return build_phase_prompt(
+        goal=_PHASE7_GOAL,
+        ends_when=_PHASE7_ENDS_WHEN,
+        statuses=PHASE7_STATUSES,
     )

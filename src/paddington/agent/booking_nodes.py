@@ -9,11 +9,13 @@ Only Phase 1 lives here today; the ``StateGraph`` that wires these nodes (plus i
 and phases 2-6) is a later slice. See docs/phase-based-booking-architecture.md.
 """
 
+import contextlib
 from typing import Protocol
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
+from playwright.async_api import Error as PlaywrightError
 
 from paddington.agent.agent_loop import AgentLoop, AgentRecursionLimitError
 from paddington.agent.booking_state import BookingState
@@ -32,17 +34,19 @@ from paddington.agent.phase_prompts import (
     PHASE4_SEATS_CHOSEN,
     PHASE5_NEEDS_RETRY,
     PHASE5_SEATS_SELECTED,
-    PHASE5_STATUSES,
     PHASE6_NEEDS_RETRY,
     PHASE6_ORDER_PREPARED,
     PHASE6_STATUSES,
+    PHASE7_NEEDS_RETRY,
+    PHASE7_PAYMENT_READY,
+    PHASE7_STATUSES,
     parse_phase_status,
     phase1_find_showtimes_prompt,
     phase3_get_to_seats_prompt,
-    phase5_select_seats_prompt,
     phase6_prepare_order_prompt,
+    phase7_fill_and_pay_prompt,
 )
-from paddington.agent.seat_extraction import offered_seats, parse_seat_map
+from paddington.agent.seat_extraction import offered_seats, parse_seat_map, parse_seat_name
 from paddington.agent.showtime_extraction import (
     ShowtimeExtractor,
     default_showtime_extractor,
@@ -50,6 +54,7 @@ from paddington.agent.showtime_extraction import (
 )
 from paddington.browser.browser_session import BrowserSession
 from paddington.logging_config import get_logger
+from paddington.schemas.browser import InteractiveElement
 
 logger = get_logger(__name__)
 
@@ -90,9 +95,17 @@ ROUTE_INFORM_NO_SEATS = "inform_no_seats"
 # the order for payment).
 ROUTE_CHECKOUT = "checkout"
 
-# Route name returned by route_after_phase_6. ROUTE_FILL_FORM is Phase 7 (form fill from
-# .env); it maps to END as a placeholder until that slice lands.
+# Route name returned by route_after_phase_6. ROUTE_FILL_FORM is the Phase 7 node (fill the
+# checkout form from .env / settings, then click "Pago").
 ROUTE_FILL_FORM = "fill_form"
+
+# Route name returned by route_after_phase_7 on success. Phase 7 is the final move, so this
+# maps straight to END — the node has already emitted the payment link as the last message.
+ROUTE_PAYMENT_SHARED = "payment_shared"
+
+# Host of the external payment gateway. The real payment link redirects here after the card
+# method is selected; a URL still on cinecolombia is the pre-redirect checkout page, not the link.
+_PLACETOPAY_HOST = "checkout.placetopay.com"
 
 
 def build_phase_1_node(
@@ -457,59 +470,118 @@ def route_after_phase_4(state: BookingState) -> str:
     return ROUTE_SELECT_SEATS
 
 
-def build_phase_5_node(agent_loop: AgentLoop) -> PhaseNode:
-    """Build the Phase 5 node — drive the inner agent to click the chosen seats.
+# Accessible names of the button that confirms the seat selection and advances off the map.
+# "Seleccionar boletas" is the real label; "Continuar"/"Confirmar" are accepted fallbacks.
+_CONFIRM_SEATS_NAMES = {"seleccionar boletas", "continuar", "confirmar"}
 
-    The lightest of the agent-driven phases (contrast Phase 1/3): the seat map is already
-    open (Phase 3 left it there; the Phase 4 interrupt does no browser action and the
-    ``BrowserSession`` persists across phases), and there is nothing to parse afterwards —
-    the LLM does the clicking. So the node needs only the ``AgentLoop``, not the session.
 
-    It hands the agent the durable seat *labels* (``chosen_seats``); the agent recovers each
-    seat's ref itself by taking a fresh snapshot and matching the accessible name
-    ``"Silla <LABEL>"`` — no ref is threaded through state (see ``seat_extraction``). Same
-    shape as Phase 3: build prompt -> run inner agent on an isolated ``:p5`` thread -> parse
-    the STATUS token -> write the outcome. A failure to cleanly select every seat (e.g. a
-    seat taken between Phase 4 and Phase 5) yields no valid status and downgrades to
-    ``NEEDS_RETRY``.
+def _find_available_seat(
+    elements: list[InteractiveElement], label: str
+) -> InteractiveElement | None:
+    """Return the interactive element for an available seat with this label, else None.
+
+    Matches by parsing each button's accessible name with ``parse_seat_name`` (which handles
+    "Silla acompañante <LABEL>" and skips "no disponible"), so a companion seat still matches
+    its plain label. Taken seats (``available=False``) are never returned.
+    """
+    for el in elements:
+        seat = parse_seat_name(el.name)
+        if seat is not None and seat.available and seat.label == label:
+            return el
+    return None
+
+
+def _find_confirm_button(elements: list[InteractiveElement]) -> InteractiveElement | None:
+    """Return the seat-map confirm button, else None (see _CONFIRM_SEATS_NAMES)."""
+    for el in elements:
+        if el.name.strip().lower() in _CONFIRM_SEATS_NAMES:
+            return el
+    return None
+
+
+def build_phase_5_node(session: BrowserSession) -> PhaseNode:
+    """Build the Phase 5 node — deterministically click the chosen seats, then confirm.
+
+    Seat clicking is code-owned (no inner agent, no prompt), the same discipline as
+    ``fill_checkout_form``: the durable seat *labels* are already in ``chosen_seats``, so a
+    code loop clicks each one EXACTLY once and never toggles. It is idempotent via the
+    snapshot's ``pressed`` flag — an already-selected seat is skipped, not re-clicked (a second
+    click DESELECTS it, which is the toggle bug this replaces). The confirm button is clicked
+    once and success is verified by the URL leaving ``/seats``, so the 0-seat confirm-spam loop
+    is structurally impossible.
+
+    The seat map is already open (Phase 3 left it there; the Phase 4 interrupt does no browser
+    action and the ``BrowserSession`` persists across phases). A missing/taken seat, a missing
+    confirm button, or a page that never leaves ``/seats`` downgrades to ``NEEDS_RETRY``.
     """
 
     async def phase_5_select_seats(state: BookingState, config: RunnableConfig) -> dict:
         chosen = state["chosen_seats"] or []
         logger.info("phase5_selecting_seats", seats=chosen)
 
-        prompt = phase5_select_seats_prompt(chosen)
+        selected: list[str] = []
+        missing: list[str] = []
 
-        outer_thread_id = config.get("configurable", {}).get("thread_id", "default_thread_id")
-        try:
-            result = await agent_loop.run(
-                user_message=f"Select these seats on the seat map: {', '.join(chosen)}",
-                thread_id=f"{outer_thread_id}:p5",
-                system_prompt=prompt,
+        # Click each chosen seat at most once. A fresh snapshot per seat keeps refs valid
+        # across any re-render the previous click triggered.
+        for label in chosen:
+            snap = await session.get_snapshot()
+            el = _find_available_seat(snap.interactive_elements, label)
+            if el is None:
+                missing.append(label)
+                continue
+            if el.pressed:
+                # Already selected (e.g. a retry) — re-clicking would DESELECT it.
+                selected.append(label)
+                continue
+            res = await session.click(el.ref)
+            (selected if res.success else missing).append(label)
+
+        if missing or len(selected) != len(chosen):
+            logger.warning(
+                "phase5_incomplete", chosen=chosen, selected=selected, missing=missing
             )
-        except AgentRecursionLimitError:
-            # The inner agent couldn't converge (classically: toggling seats without ever
-            # clicking the confirm button). Don't crash the whole booking graph — downgrade
-            # to NEEDS_RETRY like Phase 1/3's failure posture. The AgentLoop already logged
-            # the tool trace (the repeated call that reveals the loop) at limit time.
-            logger.warning("phase5_recursion_limit", seats=chosen)
             return {
                 "phase_outcome": PHASE5_NEEDS_RETRY,
                 "messages": [
-                    AIMessage(content="I couldn't finish selecting the seats. Please try again.")
+                    AIMessage(content="I couldn't select all the seats. Please try again.")
                 ],
             }
 
-        outcome = parse_phase_status(result.answer, PHASE5_STATUSES, PHASE5_NEEDS_RETRY)
-        logger.info(
-            "phase5_completed",
-            outcome=outcome,
-            iterations=result.iterations,
-            tools_used=result.tools_used,
-        )
+        # Confirm exactly once, then verify the page left the seat map.
+        snap = await session.get_snapshot()
+        confirm = _find_confirm_button(snap.interactive_elements)
+        if confirm is None:
+            logger.warning("phase5_no_confirm_button", seats=selected)
+            return {
+                "phase_outcome": PHASE5_NEEDS_RETRY,
+                "messages": [
+                    AIMessage(content="I couldn't confirm the seats. Please try again.")
+                ],
+            }
+        await session.click(confirm.ref)
+        with contextlib.suppress(PlaywrightError):
+            await session.page.wait_for_url(
+                lambda u: not u.rstrip("/").endswith("/seats"), timeout=15_000
+            )
+
+        if session.page.url.rstrip("/").endswith("/seats"):
+            logger.warning("phase5_still_on_seat_map", url=session.page.url, seats=selected)
+            return {
+                "phase_outcome": PHASE5_NEEDS_RETRY,
+                "messages": [
+                    AIMessage(content="I couldn't confirm the seats. Please try again.")
+                ],
+            }
+
+        logger.info("phase5_completed", outcome=PHASE5_SEATS_SELECTED, seats=selected)
         return {
-            "phase_outcome": outcome,
-            "messages": [AIMessage(content=result.answer)],
+            "phase_outcome": PHASE5_SEATS_SELECTED,
+            "messages": [
+                AIMessage(
+                    content=f"Selected seats {', '.join(selected)} and continued to checkout."
+                )
+            ],
         }
 
     return phase_5_select_seats
@@ -618,9 +690,125 @@ def build_phase_6_node(agent_loop: AgentLoop) -> PhaseNode:
 def route_after_phase_6(state: BookingState) -> str:
     """Map Phase 6's outcome to the next node name (the conditional edge)."""
     if state["phase_outcome"] == PHASE6_ORDER_PREPARED:
-        # -> Phase 7 (form fill from .env); placeholder END until that slice lands.
+        # -> Phase 7 (fill the checkout form, then click "Pago").
         return ROUTE_FILL_FORM
     # No valid status (couldn't prepare the order) -> the generic retry inform exit.
+    return ROUTE_INFORM_NEEDS_RETRY
+
+
+def build_phase_7_node(agent_loop: AgentLoop, session: BrowserSession) -> PhaseNode:
+    """Build the Phase 7 node — fill the checkout form, click "Pago", share the payment link.
+
+    The final phase. Phase 6 left the browser on the payment/form page. The agent identifies
+    which form field is which and fills them all in ONE ``fill_checkout_form`` call (values come
+    from settings — the LLM never sees or types the PII), clicks "Pago" to reach the
+    payment-method page, then selects the "Tarjeta de Débito / Crédito" card method, which
+    redirects to the external gateway (``checkout.placetopay.com``). Unlike Phase 5/6 this node
+    takes the ``session`` (like Phase 1/3) for two reasons: it disables debug screenshotting for
+    this PII phase, and it reads the redirect URL (the payment link) code-side rather than
+    trusting the LLM to transcribe it — the same "code owns URLs" discipline Phase 1 uses for
+    ``chosen_showtime_url``.
+
+    On success it writes ``payment_link`` (verified to be on the gateway host) and emits a final,
+    code-built message containing that URL. A failure to fill the form, reach payment, or land on
+    the gateway yields ``NEEDS_RETRY`` rather than sharing the wrong (pre-redirect) checkout URL.
+    """
+
+    async def phase_7_fill_and_pay(state: BookingState, config: RunnableConfig) -> dict:
+        # PII phase: stop writing debug screenshots. The filled form (and every snapshot/click
+        # after it) shows the user's name/email/cédula; fill_checkout_form already skips its own
+        # capture, but the surrounding get_snapshot/click calls would still screenshot it.
+        if session.recorder:
+            session.recorder.enabled = False
+
+        thread_id = f"{config.get('configurable', {}).get('thread_id', 'default_thread_id')}:p7"
+        logger.info("phase7_filling_form", thread_id=thread_id)
+
+        prompt = phase7_fill_and_pay_prompt()
+
+        try:
+            result = await agent_loop.run(
+                user_message="Fill the checkout form and continue to payment.",
+                thread_id=thread_id,
+                system_prompt=prompt,
+            )
+        except AgentRecursionLimitError:
+            # The inner agent couldn't converge (e.g. the "Pago" button never enabled). Don't
+            # crash the booking graph — downgrade to NEEDS_RETRY like Phase 5/6's failure posture.
+            logger.warning("phase7_recursion_limit", thread_id=thread_id)
+            return {
+                "phase_outcome": PHASE7_NEEDS_RETRY,
+                "messages": [
+                    AIMessage(content="I couldn't complete the checkout. Please try again.")
+                ],
+            }
+
+        outcome = parse_phase_status(result.answer, PHASE7_STATUSES, PHASE7_NEEDS_RETRY)
+        if outcome != PHASE7_PAYMENT_READY:
+            # No valid STATUS -> downgrade. Log the agent's own final report: it usually says
+            # which field or button it got stuck on, which the fill/click traces then explain.
+            logger.warning(
+                "phase7_no_valid_status",
+                outcome=outcome,
+                iterations=result.iterations,
+                tools_used=result.tools_used,
+                agent_report=result.answer,
+            )
+            return {
+                "phase_outcome": outcome,
+                "messages": [AIMessage(content=result.answer)],
+            }
+
+        # Code owns the URL: read the redirect target (the payment link) directly rather than
+        # trusting the LLM to transcribe it. The real link lives on the external gateway
+        # (checkout.placetopay.com), reached only after the card payment method is selected. A
+        # cross-domain redirect can lag the agent's last get_snapshot, so give it a moment to
+        # settle, then verify the domain code-side.
+        if _PLACETOPAY_HOST not in session.page.url:
+            with contextlib.suppress(PlaywrightError):
+                await session.page.wait_for_url(f"**{_PLACETOPAY_HOST}**", timeout=15_000)
+
+        payment_link = session.page.url
+        if _PLACETOPAY_HOST not in payment_link:
+            # Still on the cinecolombia checkout page -> the payment-method selection didn't
+            # complete. Do NOT share the wrong (checkout) link; downgrade like the other failures.
+            logger.warning("phase7_no_gateway_redirect", url=payment_link, thread_id=thread_id)
+            return {
+                "phase_outcome": PHASE7_NEEDS_RETRY,
+                "messages": [
+                    AIMessage(content="I couldn't reach the payment gateway. Please try again.")
+                ],
+            }
+
+        logger.info(
+            "phase7_completed",
+            outcome=outcome,
+            iterations=result.iterations,
+            tools_used=result.tools_used,
+            gateway=True,
+        )
+        return {
+            "phase_outcome": outcome,
+            "payment_link": payment_link,
+            "messages": [
+                AIMessage(
+                    content=(
+                        "Your seats are reserved. Complete your payment here to confirm your "
+                        f"tickets:\n\n{payment_link}"
+                    )
+                )
+            ],
+        }
+
+    return phase_7_fill_and_pay
+
+
+def route_after_phase_7(state: BookingState) -> str:
+    """Map Phase 7's outcome to the next node name (the conditional edge)."""
+    if state["phase_outcome"] == PHASE7_PAYMENT_READY:
+        # The final move: the payment link was shared, so end the workflow.
+        return ROUTE_PAYMENT_SHARED
+    # No valid status (couldn't fill the form or reach payment) -> the generic retry inform exit.
     return ROUTE_INFORM_NEEDS_RETRY
 
 

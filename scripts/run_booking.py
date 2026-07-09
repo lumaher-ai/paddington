@@ -90,6 +90,8 @@ def _print_final(state: dict) -> None:
         print(f"Showtime: {state['chosen_showtime']}")
     if state.get("chosen_seats"):
         print(f"Seats: {', '.join(state['chosen_seats'])}")
+    if state.get("payment_link"):
+        print(f"Payment link: {state['payment_link']}")
     msgs = state.get("messages") or []
     if msgs and hasattr(msgs[-1], "content"):
         print(f"\nAgent's last word:\n{str(msgs[-1].content)[:800]}")
