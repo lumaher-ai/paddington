@@ -264,70 +264,9 @@ PHASE5_STATUSES = {
     PHASE5_SEATS_SELECTED,
 }
 
-_PHASE5_GOAL = """\
-Select the seats the user chose, then confirm the selection to advance.
-The interactive seat map is already open from the previous step.
-
-Seats to select: {named_seats}
-
-Work through the chosen seats ONE AT A TIME:
-1. get_snapshot to read the current seat map and its fresh element refs.
-2. Find the button for the next chosen seat you have NOT clicked yet. An available
-   seat's accessible name ends with its label — "Silla K10", or for a companion
-   seat "Silla acompañante K10". Skip any seat whose name contains "no disponible"
-   (already taken).
-3. click that seat's ref exactly once. Clicking selects the seat.
-4. get_snapshot again — the click changed the page and regenerated every ref.
-
-CRITICAL — do not toggle seats. Click each chosen seat EXACTLY ONCE. Keep track of
-which seats you have already clicked; a seat you already selected will look
-different now (highlighted, or its name changes — e.g. it no longer reads plainly
-"Silla <LABEL>"). NEVER click a seat you have already selected: a second click
-DESELECTS it and you will loop forever. If all your chosen seats already appear
-selected, stop clicking seats and move on.
-
-Once EVERY chosen seat is selected, confirm the selection:
-5. Find and click the button that continues to the next step — the bottom button
-   labelled "Seleccionar boletas" (accept "Continuar" or "Confirmar" if that exact
-   label is not present). It may only appear once the required number of seats is
-   selected, so if you do not see it, get_snapshot once more and look again.
-   Click it ONCE, then get_snapshot — the page may take a moment to advance, so do
-   not immediately click it again just because the URL hasn't changed yet.
-6. get_snapshot and read the page URL. The seat map's URL ends in "/seats". The
-   moment the URL no longer ends in "/seats" (for example it now ends in "/tickets"),
-   you have SUCCEEDED — STOP IMMEDIATELY and report SEATS_SELECTED.
-
-CRITICAL — the instant the page leaves the seat map, your job is DONE. Do NOT click
-"Siguiente", do NOT change ticket quantities, and do NOT click ANY button on the
-ticket/quantity page that follows — that is a later step's job, not yours. Clicking
-anything there is an error.
-
-If a chosen seat is missing or reads "no disponible", do not substitute another
-seat — report that you could not select it. Do NOT log in or enter any payment
-details; your job ends the moment the page advances past the seat map."""
-
-_PHASE5_ENDS_WHEN = (
-    'every chosen seat is selected, you have clicked "Seleccionar boletas" '
-    '("Continuar"/"Confirmar"), and the page has left the seat map (its URL no longer '
-    'ends in "/seats") — stop there and click nothing on the next page (or a chosen '
-    "seat is unavailable and cannot be selected)"
-)
-
-
-def phase5_select_seats_prompt(chosen_seats: list[str]) -> str:
-    """System prompt for Phase 5 — click each chosen seat on the open seat map.
-
-    ``chosen_seats`` are the durable labels the Phase 4 interrupt validated and persisted
-    (e.g. ``["K10", "K11"]``). Each is rendered as its expected accessible name
-    (``"Silla K10"``) so the agent can find the matching button in a fresh snapshot and
-    click its ref — the ref itself is never carried in state (see ``seat_extraction``).
-    """
-    named_seats = ", ".join(f'"Silla {label}"' for label in chosen_seats)
-    return build_phase_prompt(
-        goal=_PHASE5_GOAL.format(named_seats=named_seats),
-        ends_when=_PHASE5_ENDS_WHEN,
-        statuses=PHASE5_STATUSES,
-    )
+# Phase 5 is now a deterministic, code-owned node (build_phase_5_node in booking_nodes) — it
+# clicks each chosen seat exactly once and confirms, with no inner agent. So there is no Phase 5
+# system prompt; only the outcome tokens above remain, consumed by the node and route_after_phase_5.
 
 
 # --- Phase 6: prepare the order for payment ----------------------------------

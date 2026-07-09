@@ -407,46 +407,132 @@ def test_route_after_phase_4(outcome: str, expected_route: str) -> None:
 
 
 def _phase5_state(chosen: list[str] | None = None) -> dict:
-    return {"chosen_seats": chosen if chosen is not None else ["K10", "K11"]}
+    return {"chosen_seats": chosen if chosen is not None else ["E7", "E8"]}
 
 
-async def test_phase_5_clicks_seats_and_reports_selected() -> None:
-    fake = _FakeAgentLoop("Both seats are now selected.\nSTATUS: SEATS_SELECTED")
-    node = build_phase_5_node(fake)
+def _seat(
+    ref: str, label: str, *, pressed: bool = False, available: bool = True
+) -> InteractiveElement:
+    taken = "no disponible " if not available else ""
+    return InteractiveElement(
+        ref=ref, role="button", name=f"Silla {taken}{label}", pressed=pressed
+    )
 
-    update = await node(_phase5_state(), _config("user-1:thread-9"))
+
+_CONFIRM_EL = InteractiveElement(ref="el_115", role="button", name="Seleccionar boletas")
+
+
+class _FakePhase5Page:
+    def __init__(self, url: str, url_after: str | None = None) -> None:
+        self.url = url
+        self._url_after = url_after
+
+    async def wait_for_url(self, predicate, timeout: int = 0) -> None:  # noqa: ANN001
+        # Simulate the confirm-click redirect settling (or not).
+        if self._url_after is not None:
+            self.url = self._url_after
+
+
+class _ClickRes:
+    def __init__(self, success: bool = True) -> None:
+        self.success = success
+
+
+class _FakePhase5Session:
+    """BrowserSession stand-in for the deterministic Phase 5 node.
+
+    Returns ``snapshots`` in order from get_snapshot() (one per seat, then the confirm read;
+    the last is reused if the node asks again), records every click, and fails clicks whose
+    ref is in ``click_fail_refs``.
+    """
+
+    def __init__(
+        self,
+        snapshots: list[PageSnapshot],
+        page: _FakePhase5Page,
+        click_fail_refs: tuple[str, ...] = (),
+    ) -> None:
+        self._snapshots = list(snapshots)
+        self.page = page
+        self.clicked: list[str] = []
+        self._click_fail_refs = set(click_fail_refs)
+
+    async def get_snapshot(self, *args, **kwargs) -> PageSnapshot:
+        if len(self._snapshots) > 1:
+            return self._snapshots.pop(0)
+        return self._snapshots[0]
+
+    async def click(self, ref: str, *args, **kwargs) -> _ClickRes:
+        self.clicked.append(ref)
+        return _ClickRes(success=ref not in self._click_fail_refs)
+
+
+def _phase5_snapshot(elements: list[InteractiveElement], url: str) -> PageSnapshot:
+    return PageSnapshot(
+        url=url, title="", markdown="", interactive_elements=elements,
+        truncated=False, total_chars=0,
+    )
+
+
+_SEATS_URL = "https://multiplex.cinecolombia.com/order/showtimes/6493-7284/seats"
+_TICKETS_URL = "https://multiplex.cinecolombia.com/order/showtimes/6493-7284/tickets"
+
+
+async def test_phase_5_clicks_each_seat_once_and_confirms() -> None:
+    seats = [_seat("el_76", "E7"), _seat("el_75", "E8"), _CONFIRM_EL]
+    snap = _phase5_snapshot(seats, _SEATS_URL)
+    page = _FakePhase5Page(_SEATS_URL, url_after=_TICKETS_URL)
+    fake = _FakePhase5Session([snap], page)
+    node = build_phase_5_node(cast(BrowserSession, fake))
+
+    update = await node(_phase5_state(), _config())
 
     assert update["phase_outcome"] == "SEATS_SELECTED"
-    assert len(update["messages"]) == 1
     assert isinstance(update["messages"][0], AIMessage)
-    # Runs on its own per-phase thread; the prompt lists the chosen seats by name.
-    call = fake.calls[0]
-    assert call["thread_id"] == "user-1:thread-9:p5"
-    assert '"Silla K10"' in call["system_prompt"]
-    assert '"Silla K11"' in call["system_prompt"]
+    # Each chosen seat clicked EXACTLY once, then the confirm button once.
+    assert fake.clicked == ["el_76", "el_75", "el_115"]
 
 
-async def test_phase_5_missing_status_downgrades_to_needs_retry() -> None:
-    fake = _FakeAgentLoop("I couldn't find one of the seat buttons.")
-    node = build_phase_5_node(fake)
+async def test_phase_5_skips_already_pressed_seat() -> None:
+    # E8 comes back already selected (pressed) — re-clicking would DESELECT it, so skip it.
+    seats = [_seat("el_76", "E7", pressed=False), _seat("el_75", "E8", pressed=True), _CONFIRM_EL]
+    snap = _phase5_snapshot(seats, _SEATS_URL)
+    page = _FakePhase5Page(_SEATS_URL, url_after=_TICKETS_URL)
+    fake = _FakePhase5Session([snap], page)
+    node = build_phase_5_node(cast(BrowserSession, fake))
+
+    update = await node(_phase5_state(), _config())
+
+    assert update["phase_outcome"] == "SEATS_SELECTED"
+    # E7 clicked, E8 skipped (already pressed), confirm clicked. No el_75 seat click.
+    assert fake.clicked == ["el_76", "el_115"]
+
+
+async def test_phase_5_missing_seat_downgrades_without_confirming() -> None:
+    # Only E7 is present; E8 is missing (e.g. taken since Phase 4) -> NEEDS_RETRY, no confirm.
+    seats = [_seat("el_76", "E7"), _CONFIRM_EL]
+    snap = _phase5_snapshot(seats, _SEATS_URL)
+    page = _FakePhase5Page(_SEATS_URL, url_after=_TICKETS_URL)
+    fake = _FakePhase5Session([snap], page)
+    node = build_phase_5_node(cast(BrowserSession, fake))
 
     update = await node(_phase5_state(), _config())
 
     assert update["phase_outcome"] == "NEEDS_RETRY"
+    assert "el_115" not in fake.clicked  # never tried to confirm
 
 
-async def test_phase_5_recursion_limit_downgrades_to_needs_retry() -> None:
-    # A toggling agent hits the recursion limit; the node must not crash the graph — it
-    # downgrades to NEEDS_RETRY (like Phase 1/3) so the outer flow ends cleanly.
-    from paddington.agent.agent_loop import AgentRecursionLimitError
-
-    fake = _FakeAgentLoop("", raises=AgentRecursionLimitError("step limit"))
-    node = build_phase_5_node(fake)
+async def test_phase_5_stuck_on_seat_map_downgrades_to_needs_retry() -> None:
+    # Seats selected and confirm clicked, but the page never leaves /seats -> NEEDS_RETRY.
+    seats = [_seat("el_76", "E7"), _seat("el_75", "E8"), _CONFIRM_EL]
+    snap = _phase5_snapshot(seats, _SEATS_URL)
+    page = _FakePhase5Page(_SEATS_URL, url_after=None)  # stays on /seats
+    fake = _FakePhase5Session([snap], page)
+    node = build_phase_5_node(cast(BrowserSession, fake))
 
     update = await node(_phase5_state(), _config())
 
     assert update["phase_outcome"] == "NEEDS_RETRY"
-    assert isinstance(update["messages"][0], AIMessage)
 
 
 @pytest.mark.parametrize(

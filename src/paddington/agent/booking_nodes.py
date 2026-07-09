@@ -47,7 +47,6 @@ from paddington.agent.phase_prompts import (
     phase7_fill_and_pay_prompt,
 )
 from paddington.agent.seat_extraction import offered_seats, parse_seat_map, parse_seat_name
-from paddington.schemas.browser import InteractiveElement
 from paddington.agent.showtime_extraction import (
     ShowtimeExtractor,
     default_showtime_extractor,
@@ -55,6 +54,7 @@ from paddington.agent.showtime_extraction import (
 )
 from paddington.browser.browser_session import BrowserSession
 from paddington.logging_config import get_logger
+from paddington.schemas.browser import InteractiveElement
 
 logger = get_logger(__name__)
 
@@ -470,59 +470,118 @@ def route_after_phase_4(state: BookingState) -> str:
     return ROUTE_SELECT_SEATS
 
 
-def build_phase_5_node(agent_loop: AgentLoop) -> PhaseNode:
-    """Build the Phase 5 node — drive the inner agent to click the chosen seats.
+# Accessible names of the button that confirms the seat selection and advances off the map.
+# "Seleccionar boletas" is the real label; "Continuar"/"Confirmar" are accepted fallbacks.
+_CONFIRM_SEATS_NAMES = {"seleccionar boletas", "continuar", "confirmar"}
 
-    The lightest of the agent-driven phases (contrast Phase 1/3): the seat map is already
-    open (Phase 3 left it there; the Phase 4 interrupt does no browser action and the
-    ``BrowserSession`` persists across phases), and there is nothing to parse afterwards —
-    the LLM does the clicking. So the node needs only the ``AgentLoop``, not the session.
 
-    It hands the agent the durable seat *labels* (``chosen_seats``); the agent recovers each
-    seat's ref itself by taking a fresh snapshot and matching the accessible name
-    ``"Silla <LABEL>"`` — no ref is threaded through state (see ``seat_extraction``). Same
-    shape as Phase 3: build prompt -> run inner agent on an isolated ``:p5`` thread -> parse
-    the STATUS token -> write the outcome. A failure to cleanly select every seat (e.g. a
-    seat taken between Phase 4 and Phase 5) yields no valid status and downgrades to
-    ``NEEDS_RETRY``.
+def _find_available_seat(
+    elements: list[InteractiveElement], label: str
+) -> InteractiveElement | None:
+    """Return the interactive element for an available seat with this label, else None.
+
+    Matches by parsing each button's accessible name with ``parse_seat_name`` (which handles
+    "Silla acompañante <LABEL>" and skips "no disponible"), so a companion seat still matches
+    its plain label. Taken seats (``available=False``) are never returned.
+    """
+    for el in elements:
+        seat = parse_seat_name(el.name)
+        if seat is not None and seat.available and seat.label == label:
+            return el
+    return None
+
+
+def _find_confirm_button(elements: list[InteractiveElement]) -> InteractiveElement | None:
+    """Return the seat-map confirm button, else None (see _CONFIRM_SEATS_NAMES)."""
+    for el in elements:
+        if el.name.strip().lower() in _CONFIRM_SEATS_NAMES:
+            return el
+    return None
+
+
+def build_phase_5_node(session: BrowserSession) -> PhaseNode:
+    """Build the Phase 5 node — deterministically click the chosen seats, then confirm.
+
+    Seat clicking is code-owned (no inner agent, no prompt), the same discipline as
+    ``fill_checkout_form``: the durable seat *labels* are already in ``chosen_seats``, so a
+    code loop clicks each one EXACTLY once and never toggles. It is idempotent via the
+    snapshot's ``pressed`` flag — an already-selected seat is skipped, not re-clicked (a second
+    click DESELECTS it, which is the toggle bug this replaces). The confirm button is clicked
+    once and success is verified by the URL leaving ``/seats``, so the 0-seat confirm-spam loop
+    is structurally impossible.
+
+    The seat map is already open (Phase 3 left it there; the Phase 4 interrupt does no browser
+    action and the ``BrowserSession`` persists across phases). A missing/taken seat, a missing
+    confirm button, or a page that never leaves ``/seats`` downgrades to ``NEEDS_RETRY``.
     """
 
     async def phase_5_select_seats(state: BookingState, config: RunnableConfig) -> dict:
         chosen = state["chosen_seats"] or []
         logger.info("phase5_selecting_seats", seats=chosen)
 
-        prompt = phase5_select_seats_prompt(chosen)
+        selected: list[str] = []
+        missing: list[str] = []
 
-        outer_thread_id = config.get("configurable", {}).get("thread_id", "default_thread_id")
-        try:
-            result = await agent_loop.run(
-                user_message=f"Select these seats on the seat map: {', '.join(chosen)}",
-                thread_id=f"{outer_thread_id}:p5",
-                system_prompt=prompt,
+        # Click each chosen seat at most once. A fresh snapshot per seat keeps refs valid
+        # across any re-render the previous click triggered.
+        for label in chosen:
+            snap = await session.get_snapshot()
+            el = _find_available_seat(snap.interactive_elements, label)
+            if el is None:
+                missing.append(label)
+                continue
+            if el.pressed:
+                # Already selected (e.g. a retry) — re-clicking would DESELECT it.
+                selected.append(label)
+                continue
+            res = await session.click(el.ref)
+            (selected if res.success else missing).append(label)
+
+        if missing or len(selected) != len(chosen):
+            logger.warning(
+                "phase5_incomplete", chosen=chosen, selected=selected, missing=missing
             )
-        except AgentRecursionLimitError:
-            # The inner agent couldn't converge (classically: toggling seats without ever
-            # clicking the confirm button). Don't crash the whole booking graph — downgrade
-            # to NEEDS_RETRY like Phase 1/3's failure posture. The AgentLoop already logged
-            # the tool trace (the repeated call that reveals the loop) at limit time.
-            logger.warning("phase5_recursion_limit", seats=chosen)
             return {
                 "phase_outcome": PHASE5_NEEDS_RETRY,
                 "messages": [
-                    AIMessage(content="I couldn't finish selecting the seats. Please try again.")
+                    AIMessage(content="I couldn't select all the seats. Please try again.")
                 ],
             }
 
-        outcome = parse_phase_status(result.answer, PHASE5_STATUSES, PHASE5_NEEDS_RETRY)
-        logger.info(
-            "phase5_completed",
-            outcome=outcome,
-            iterations=result.iterations,
-            tools_used=result.tools_used,
-        )
+        # Confirm exactly once, then verify the page left the seat map.
+        snap = await session.get_snapshot()
+        confirm = _find_confirm_button(snap.interactive_elements)
+        if confirm is None:
+            logger.warning("phase5_no_confirm_button", seats=selected)
+            return {
+                "phase_outcome": PHASE5_NEEDS_RETRY,
+                "messages": [
+                    AIMessage(content="I couldn't confirm the seats. Please try again.")
+                ],
+            }
+        await session.click(confirm.ref)
+        with contextlib.suppress(PlaywrightError):
+            await session.page.wait_for_url(
+                lambda u: not u.rstrip("/").endswith("/seats"), timeout=15_000
+            )
+
+        if session.page.url.rstrip("/").endswith("/seats"):
+            logger.warning("phase5_still_on_seat_map", url=session.page.url, seats=selected)
+            return {
+                "phase_outcome": PHASE5_NEEDS_RETRY,
+                "messages": [
+                    AIMessage(content="I couldn't confirm the seats. Please try again.")
+                ],
+            }
+
+        logger.info("phase5_completed", outcome=PHASE5_SEATS_SELECTED, seats=selected)
         return {
-            "phase_outcome": outcome,
-            "messages": [AIMessage(content=result.answer)],
+            "phase_outcome": PHASE5_SEATS_SELECTED,
+            "messages": [
+                AIMessage(
+                    content=f"Selected seats {', '.join(selected)} and continued to checkout."
+                )
+            ],
         }
 
     return phase_5_select_seats

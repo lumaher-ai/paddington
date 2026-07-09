@@ -93,9 +93,10 @@ def build_booking_graph(
     # Phase 4 presents Phase 3's seats and interrupts for the user's choice. Registered
     # under ROUTE_PRESENT_SEATS so Phase 3's path_map routes SEAT_MAP_VISIBLE straight to it.
     builder.add_node(ROUTE_PRESENT_SEATS, build_phase_4_node())
-    # Phase 5 clicks the chosen seats on the seat map. Registered under ROUTE_SELECT_SEATS so
-    # Phase 4's path_map routes SEATS_CHOSEN straight to it.
-    builder.add_node(ROUTE_SELECT_SEATS, build_phase_5_node(agent_loop))
+    # Phase 5 deterministically clicks the chosen seats on the seat map and confirms — code-owned
+    # (no inner agent), so it takes the session. Registered under ROUTE_SELECT_SEATS so Phase 4's
+    # path_map routes SEATS_CHOSEN straight to it.
+    builder.add_node(ROUTE_SELECT_SEATS, build_phase_5_node(session))
     # Phase 6 prepares the order for payment (adds tickets, advances past food & drinks).
     # Registered under ROUTE_CHECKOUT so Phase 5's SEATS_SELECTED branch routes straight to it.
     builder.add_node(ROUTE_CHECKOUT, build_phase_6_node(agent_loop))

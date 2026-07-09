@@ -13,7 +13,6 @@ from paddington.agent.phase_prompts import (
     build_phase_prompt,
     parse_phase_status,
     phase1_find_showtimes_prompt,
-    phase5_select_seats_prompt,
     phase6_prepare_order_prompt,
 )
 
@@ -48,22 +47,8 @@ def test_phase1_prompt_interpolates_booking_params() -> None:
     assert "THEATER_UNAVAILABLE" in prompt
 
 
-def test_phase5_prompt_lists_chosen_seats_as_accessible_names() -> None:
-    prompt = phase5_select_seats_prompt(["K10", "K11"])
-    assert BROWSER_BASE_PROMPT in prompt
-    # Each label is rendered as the seat button's accessible name the agent matches on.
-    assert '"Silla K10"' in prompt
-    assert '"Silla K11"' in prompt
-    # The companion-seat variant is called out so an exact-string match isn't assumed.
-    assert "acompañante" in prompt
-    # The anti-toggle rule: never re-click a selected seat (that deselects it → loop).
-    assert "EXACTLY ONCE" in prompt
-    assert "DESELECTS" in prompt
-    # After selecting, the agent must click the confirm button to advance.
-    assert "Seleccionar boletas" in prompt
-    assert "Stop and report your findings as soon as" in prompt
-    # Only the happy outcome token is advertised in the STATUS instruction.
-    assert "SEATS_SELECTED" in prompt
+# Phase 5 no longer has a system prompt — seat selection is a deterministic, code-owned node
+# (see build_phase_5_node / test_phase_5_* in tests/test_booking_nodes.py).
 
 
 def test_phase6_prompt_describes_ticket_quantity_and_checkout_buttons() -> None:
